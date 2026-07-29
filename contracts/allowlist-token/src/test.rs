@@ -1,6 +1,15 @@
 use super::*;
 use soroban_sdk::testutils::{Address as _, Events as _};
-use soroban_sdk::{contract, contractimpl, symbol_short, vec, Env, IntoVal, Map, Symbol, Val};
+use soroban_sdk::{contract, contractimpl, symbol_short, vec, BytesN, Env, IntoVal, Map, Symbol, Val};
+
+/// Compiled WASM of the allowlist-token contract, used as an upgrade target
+/// in tests. The upgrade replaces the running code with the same contract
+/// code, which is sufficient to verify that storage (admin, token address,
+/// allowlist entries) survives the upgrade and that the auth gate works.
+const ALLOWLIST_TOKEN_WASM: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../target/wasm32v1-none/release/allowlist_token.wasm"
+));
 
 /// A minimal token double used only by these tests, so `allowlist-token`'s
 /// unit tests don't depend on any particular real SEP-41 implementation.
@@ -205,4 +214,58 @@ fn test_remove_from_allowlist_emits_allow_remove_event() {
             ),
         ]
     );
+}
+
+#[test]
+fn test_upgrade_by_admin_preserves_storage() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let token_address = Address::generate(&env);
+    let contract_id = env.register(AllowlistToken, ());
+    let client = AllowlistTokenClient::new(&env, &contract_id);
+    client.initialize(&admin, &token_address);
+
+    // Set up some state
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    client.add_to_allowlist(&admin, &alice);
+    client.add_to_allowlist(&admin, &bob);
+
+    assert!(client.is_allowed(&alice));
+    assert!(client.is_allowed(&bob));
+
+    // Upload the same contract's wasm and use it as upgrade target
+    let wasm_hash: BytesN<32> = env.deployer().upload_contract_wasm(ALLOWLIST_TOKEN_WASM);
+
+    // Upgrade
+    client.upgrade(&admin, &wasm_hash);
+
+    // Storage survives the upgrade — allowlist entries, admin, and token
+    // address are all preserved because the upgrade only replaces the code,
+    // not the contract ID or its storage.
+    assert!(client.is_allowed(&alice));
+    assert!(client.is_allowed(&bob));
+
+    // The contract still functions after the upgrade
+    let charlie = Address::generate(&env);
+    client.add_to_allowlist(&admin, &charlie);
+    assert!(client.is_allowed(&charlie));
+}
+
+#[test]
+fn test_upgrade_rejects_non_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let token_address = Address::generate(&env);
+    let contract_id = env.register(AllowlistToken, ());
+    let client = AllowlistTokenClient::new(&env, &contract_id);
+    client.initialize(&admin, &token_address);
+
+    let wasm_hash: BytesN<32> = env.deployer().upload_contract_wasm(ALLOWLIST_TOKEN_WASM);
+
+    let impostor = Address::generate(&env);
+    let result = client.try_upgrade(&impostor, &wasm_hash);
+    assert_eq!(result, Err(Ok(Error::NotAuthorized)));
 }
