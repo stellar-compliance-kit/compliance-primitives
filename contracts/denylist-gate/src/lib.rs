@@ -16,7 +16,7 @@
 //! example of a token contract wiring `check()` into its `transfer` path.
 #![no_std]
 
-use soroban_sdk::{contract, contracterror, contractevent, contractimpl, contracttype, Address, Env};
+use soroban_sdk::{contract, contracterror, contractevent, contractimpl, contracttype, Address, BytesN, Env};
 
 #[contracttype]
 #[derive(Clone)]
@@ -91,6 +91,24 @@ impl DenylistGate {
             .persistent()
             .get(&DataKey::Denied(address))
             .unwrap_or(false)
+    }
+
+    /// Upgrade the contract WASM. Admin-only.
+    ///
+    /// Uses Soroban's native `update_current_contract_wasm` host function to
+    /// swap the contract code behind the same contract ID. All existing
+    /// storage (admin, denylist entries) is preserved across the upgrade.
+    /// The admin's auth is verified before the upgrade proceeds.
+    ///
+    /// This follows the same design as the jurisdiction-flag and
+    /// allowlist-token upgrades; see those for the security-model writeup.
+    /// Denylist entries stored under `DataKey::Denied(Address)` are
+    /// persistent storage and survive the upgrade without any special
+    /// handling.
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        Ok(())
     }
 
     fn require_admin(env: &Env, admin: &Address) -> Result<(), Error> {

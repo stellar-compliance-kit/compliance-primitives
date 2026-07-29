@@ -2,9 +2,9 @@
 
 This PR implements two features:
 
-1. **Add upgradeability pattern to jurisdiction-flag and allowlist-token** — adds Soroban-native contract upgrade support (`update_current_contract_wasm` host function) gated behind admin/issuer auth to both contracts. jurisdiction-flag serves as the pilot (#27); allowlist-token follows the same design (#113).
+1. **Add upgradeability pattern to denylist-gate** — extends the Soroban-native contract upgrade support to the last contract in the workspace, following the same pattern proven in jurisdiction-flag (#27) and allowlist-token (#113). All three contracts now support `upgrade()` gated behind admin auth (#114).
 
-2. **Threat model document** — a comprehensive `docs/THREAT_MODEL.md` covering griefing, front-running, and admin-key-compromise scenarios for all three contracts, with severity/likelihood ratings and cross-references to existing mitigations (#112).
+2. **Shared state-migration CLI script** — a `scripts/migrate-state.sh` script that provides the plumbing to back up contract state, upgrade the WASM, and restore state into the upgraded contract. Works with all three contract types and accepts a pluggable migration hook for data transformations (#115).
 
 ---
 
@@ -12,45 +12,43 @@ This PR implements two features:
 
 ### Contracts
 
-#### `contracts/jurisdiction-flag/src/lib.rs`
-- Added `upgrade(env, issuer, new_wasm_hash) -> Result<(), Error>` — gated behind `require_issuer`, uses `env.deployer().update_current_contract_wasm` to swap the contract WASM behind the same contract ID. All existing storage (issuer address, jurisdiction flags) is preserved.
+#### `contracts/denylist-gate/src/lib.rs`
+- Added `upgrade(env, admin, new_wasm_hash) -> Result<(), Error>` — gated behind `require_admin`, uses `env.deployer().update_current_contract_wasm` to swap the contract WASM behind the same contract ID. Denylist entries stored under `DataKey::Denied(Address)` are persistent storage and survive the upgrade. References the security-model writeup from jurisdiction-flag (#27).
 
-#### `contracts/jurisdiction-flag/src/test.rs`
-- Added `test_upgrade_by_issuer_preserves_storage` — uploads the contract's own compiled WASM, upgrades the running contract, and verifies jurisdiction flags survive and the contract still functions.
-- Added `test_upgrade_rejects_non_issuer` — confirms a non-issuer address gets `NotAuthorized` when calling `upgrade`.
-- Removed inline `V2JurisdictionFlag` test double (replaced by uploading the compiled contract WASM directly).
+#### `contracts/denylist-gate/src/test.rs`
+- Added `test_upgrade_by_admin_preserves_storage` — uploads the contract's own compiled WASM, upgrades, and verifies denylist entries survive and the contract still functions.
+- Added `test_upgrade_rejects_non_admin` — confirms a non-admin gets `NotAuthorized` when calling `upgrade`.
 
-#### `contracts/allowlist-token/src/lib.rs`
-- Added `upgrade(env, admin, new_wasm_hash) -> Result<(), Error>` — same design as jurisdiction-flag, gated behind `require_admin`. References the jurisdiction-flag security writeup. Notes that the wrapped token address (`DataKey::Token`) is instance storage and survives upgrades without special handling.
+### Scripts
 
-#### `contracts/allowlist-token/src/test.rs`
-- Added `test_upgrade_by_admin_preserves_storage` — verifies allowlist entries, admin, and token address survive an upgrade; confirms the contract still functions afterward.
-- Added `test_upgrade_rejects_non_admin` — confirms a non-admin gets `NotAuthorized`.
-- Removed inline `V2AllowlistToken` test double (replaced by uploading the compiled contract WASM directly).
-- Removed unused `Bytes` import.
+#### `scripts/migrate-state.sh` (new)
+A shared CLI script providing end-to-end state migration plumbing:
 
-### Documentation
+| Command | Description |
+|---------|-------------|
+| `backup` | Reads state from a deployed contract via its view functions (one address per line on stdin) and outputs a portable backup format |
+| `restore` | Writes state from a backup file back into a contract via admin-authorized calls |
+| `upgrade` | Uploads a new WASM blob and invokes the contract's `upgrade()` function |
+| `migrate` | Runs all three steps (backup → transform → upgrade → restore) in sequence |
 
-#### `docs/THREAT_MODEL.md`
-New file covering three threat categories for each contract:
+**Pluggable transformation**: set `MIGRATE_HOOK` to a script path that transforms the backup data before restore — allowing migration-specific logic (e.g., re-keying `DataKey` variants, changing value formats) without modifying the core plumbing.
 
-| Contract | Griefing | Front-running | Admin-key-compromise |
-|----------|----------|---------------|---------------------|
-| allowlist-token | Low severity (caller-pays fees; no public writes) | Low-medium (one-ledger window) | High-Critical (upgrade path, key compromise) |
-| denylist-gate | Low severity (caller-pays; no public writes) | Medium (one-ledger window for denylist adds) | High (full denylist control) |
-| jurisdiction-flag | Low severity (caller-pays; issuer-only writes) | Low (one-ledger window for reads) | High-Critical (jurisdiction + upgrade) |
+**Per-contract support**: handles all three contract types with their different data shapes:
+- `allowlist-token` — reads via `is_allowed`, writes via `add_to_allowlist`
+- `denylist-gate` — reads via `check`, writes via `add_to_denylist`
+- `jurisdiction-flag` — reads via `get_jurisdiction`, writes via `set_jurisdiction`
 
-Each scenario is rated for severity/likelihood and cross-referenced to existing mitigation tests, documented invariants, or pending issues (#74/#75/#76, #84/#85).
+See the script's header documentation for usage examples and the `MIGRATE_HOOK` interface.
 
 ---
 
 ## Testing
 
-All 30 tests pass across the workspace:
-- 12 allowlist-token tests (including 2 new upgrade tests)
-- 6 denylist-gate tests
+All 32 tests pass across the workspace:
+- 12 allowlist-token tests
+- 8 denylist-gate tests (including 2 new upgrade tests)
 - 2 denylist-gate-consumer tests
-- 10 jurisdiction-flag tests (including 2 new upgrade tests)
+- 10 jurisdiction-flag tests
 
 Clippy passes with zero warnings (`cargo clippy --workspace --all-targets -- -D warnings`).
 
@@ -58,14 +56,14 @@ Clippy passes with zero warnings (`cargo clippy --workspace --all-targets -- -D 
 
 ## Upgrade design notes
 
-Both contracts follow the same Soroban-native upgrade pattern:
+All three contracts now follow the same Soroban-native upgrade pattern:
 
 1. **Auth**: `upgrade()` requires the admin/issuer key (same `require_admin`/`require_issuer` pattern used by all state-mutating functions).
 2. **Mechanism**: `env.deployer().update_current_contract_wasm(new_wasm_hash)` — a Soroban host function that atomically replaces the contract code behind the same contract ID.
-3. **Storage**: All instances storage (admin/issuer, token address) and persistent storage (allowlist entries, jurisdiction flags) survive the upgrade. The contract ID does not change.
-4. **Security**: There is no timelock or multi-sig requirement on `upgrade()`. A compromised admin/issuer key can replace the contract code immediately. This is documented in the threat model as a critical-severity scenario with pending mitigation (timelock/multi-sig).
+3. **Storage**: All instance storage (admin/issuer, token address) and persistent storage (allowlist entries, denylist entries, jurisdiction flags) survive the upgrade. The contract ID does not change.
+4. **Security**: There is no timelock or multi-sig requirement on `upgrade()`. A compromised admin/issuer key can replace the contract code immediately.
 
 ---
 
-closes #112
-closes #113
+closes #114
+closes #115
