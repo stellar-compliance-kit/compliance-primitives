@@ -71,3 +71,13 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run cargo-deny
         uses: EmbarkStudios/cargo-deny-action@v2
+
+  changelog-version-sync:
+    name: changelog version sync check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Check CHANGELOG.md and version are in sync
+        run: ./scripts/check-changelog.sh

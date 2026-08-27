@@ -212,3 +212,163 @@ fn test_signer_update_requires_multisig_auth() {
     // A separate rejection test for the threshold path is
     // test_threshold_not_met_error_value above.
 }
+
+// ---------------------------------------------------------------------------
+// Proposal workflow tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_propose_creates_proposal() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_signers, _id, client) = setup_multisig(&env, 2, 1);
+
+    let payload = soroban_sdk::Bytes::new(&env);
+    let expiry = env.ledger().sequence() + 100;
+    let proposal_id = client.propose(&payload, &expiry).unwrap();
+    assert_eq!(proposal_id, 0);
+
+    let (stored_payload, stored_expiry, approvals) = client.get_proposal(&proposal_id).unwrap();
+    assert_eq!(stored_payload, payload);
+    assert_eq!(stored_expiry, expiry);
+    assert_eq!(approvals.len(), 0);
+}
+
+#[test]
+fn test_propose_with_past_expiry_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_signers, _id, client) = setup_multisig(&env, 2, 1);
+
+    let payload = soroban_sdk::Bytes::new(&env);
+    let expiry = env.ledger().sequence() - 1;
+    let result = client.try_propose(&payload, &expiry);
+    assert_eq!(result, Err(Ok(Error::ExpiredProposal)));
+}
+
+#[test]
+fn test_approve_adds_approval() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (signers, _id, client) = setup_multisig(&env, 2, 1);
+
+    let payload = soroban_sdk::Bytes::new(&env);
+    let expiry = env.ledger().sequence() + 100;
+    let proposal_id = client.propose(&payload, &expiry).unwrap();
+
+    let approver = signers.get(0).unwrap();
+    let ready = client.approve(&proposal_id, &approver).unwrap();
+    assert!(!ready);
+
+    let (_payload, _expiry, approvals) = client.get_proposal(&proposal_id).unwrap();
+    assert_eq!(approvals.len(), 1);
+    assert_eq!(approvals.get(0).unwrap(), approver);
+}
+
+#[test]
+fn test_approve_expired_proposal_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (signers, _id, client) = setup_multisig(&env, 2, 1);
+
+    let payload = soroban_sdk::Bytes::new(&env);
+    let expiry = env.ledger().sequence() + 10;
+    let proposal_id = client.propose(&payload, &expiry).unwrap();
+
+    env.ledger().set_sequence_number(expiry);
+
+    let approver = signers.get(0).unwrap();
+    let result = client.try_approve(&proposal_id, &approver);
+    assert_eq!(result, Err(Ok(Error::ExpiredProposal)));
+}
+
+#[test]
+fn test_approve_twice_by_same_signer_idempotent() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (signers, _id, client) = setup_multisig(&env, 2, 1);
+
+    let payload = soroban_sdk::Bytes::new(&env);
+    let expiry = env.ledger().sequence() + 100;
+    let proposal_id = client.propose(&payload, &expiry).unwrap();
+
+    let approver = signers.get(0).unwrap();
+    client.approve(&proposal_id, &approver).unwrap();
+    let ready = client.approve(&proposal_id, &approver).unwrap();
+    assert!(!ready);
+
+    let (_payload, _expiry, approvals) = client.get_proposal(&proposal_id).unwrap();
+    assert_eq!(approvals.len(), 1);
+}
+
+#[test]
+fn test_approve_reaches_threshold_returns_true() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (signers, _id, client) = setup_multisig(&env, 3, 2);
+
+    let payload = soroban_sdk::Bytes::new(&env);
+    let expiry = env.ledger().sequence() + 100;
+    let proposal_id = client.propose(&payload, &expiry).unwrap();
+
+    let approver1 = signers.get(0).unwrap();
+    let approver2 = signers.get(1).unwrap();
+
+    let ready1 = client.approve(&proposal_id, &approver1).unwrap();
+    assert!(!ready1);
+
+    let ready2 = client.approve(&proposal_id, &approver2).unwrap();
+    assert!(ready2);
+}
+
+#[test]
+fn test_execute_deletes_proposal() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (signers, _id, client) = setup_multisig(&env, 2, 1);
+
+    let payload = soroban_sdk::Bytes::new(&env);
+    let expiry = env.ledger().sequence() + 100;
+    let proposal_id = client.propose(&payload, &expiry).unwrap();
+
+    let approver = signers.get(0).unwrap();
+    client.approve(&proposal_id, &approver).unwrap();
+
+    client.execute(&proposal_id).unwrap();
+
+    let result = client.try_get_proposal(&proposal_id);
+    assert_eq!(result, Err(Ok(Error::ProposalNotFound)));
+}
+
+#[test]
+fn test_execute_expired_proposal_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (signers, _id, client) = setup_multisig(&env, 2, 1);
+
+    let payload = soroban_sdk::Bytes::new(&env);
+    let expiry = env.ledger().sequence() + 10;
+    let proposal_id = client.propose(&payload, &expiry).unwrap();
+
+    let approver = signers.get(0).unwrap();
+    client.approve(&proposal_id, &approver).unwrap();
+
+    env.ledger().set_sequence_number(expiry);
+
+    let result = client.try_execute(&proposal_id);
+    assert_eq!(result, Err(Ok(Error::ExpiredProposal)));
+}
+
+#[test]
+fn test_execute_without_threshold_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_signers, _id, client) = setup_multisig(&env, 3, 2);
+
+    let payload = soroban_sdk::Bytes::new(&env);
+    let expiry = env.ledger().sequence() + 100;
+    let proposal_id = client.propose(&payload, &expiry).unwrap();
+
+    let result = client.try_execute(&proposal_id);
+    assert_eq!(result, Err(Ok(Error::ThresholdNotMet)));
+}

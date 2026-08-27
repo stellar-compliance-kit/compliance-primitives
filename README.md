@@ -43,6 +43,10 @@ deployment and walkthrough.
 
 ## Quick start
 
+**New here?** Start with [**QUICKSTART.md**](./QUICKSTART.md) — it walks you through clone → build → test → example → testnet → web playground in one go.
+
+For a condensed reference, the essentials are:
+
 ```sh
 # Clone
 git clone https://github.com/stellar-compliance-kit/compliance-primitives.git

@@ -58,11 +58,26 @@ use soroban_sdk::{
 
 #[contracttype]
 #[derive(Clone)]
+struct Proposal {
+    /// The payload to execute (opaque bytes).
+    pub payload: soroban_sdk::Bytes,
+    /// Ledger sequence at which this proposal expires.
+    pub expiry: u32,
+    /// Addresses that have approved this proposal.
+    pub approvals: Vec<Address>,
+}
+
+#[contracttype]
+#[derive(Clone)]
 enum DataKey {
     /// `Vec<Address>` — the current signer set.
     Signers,
     /// `u32` — minimum number of signers required to authorize.
     Threshold,
+    /// `Proposal` — a pending proposal keyed by its ID.
+    Proposal(u64),
+    /// `u64` — the next proposal ID to assign.
+    NextProposalId,
 }
 
 // ---------------------------------------------------------------------------
@@ -85,6 +100,10 @@ pub enum Error {
     SignerNotFound = 5,
     /// The address to add is already in the signer set.
     AlreadySigner = 6,
+    /// The proposal has expired and can no longer be approved or executed.
+    ExpiredProposal = 7,
+    /// The proposal with the given ID does not exist.
+    ProposalNotFound = 8,
 }
 
 // ---------------------------------------------------------------------------
@@ -222,6 +241,150 @@ impl MultisigAdmin {
             .instance()
             .get(&DataKey::Threshold)
             .unwrap_or(0)
+    }
+
+    // -----------------------------------------------------------------------
+    // Proposal workflow
+    // -----------------------------------------------------------------------
+
+    /// Create a new proposal with the given payload. Returns the proposal ID.
+    /// The proposal expires at `expiry_ledger`.
+    pub fn propose(
+        env: Env,
+        payload: soroban_sdk::Bytes,
+        expiry_ledger: u32,
+    ) -> Result<u64, Error> {
+        let current_ledger = env.ledger().sequence();
+        if expiry_ledger <= current_ledger {
+            return Err(Error::ExpiredProposal);
+        }
+
+        let proposal_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::NextProposalId)
+            .unwrap_or(0);
+
+        let signers: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Signers)
+            .ok_or(Error::NotInitialized)?;
+
+        let proposal = Proposal {
+            payload,
+            expiry: expiry_ledger,
+            approvals: Vec::new(&env),
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Proposal(proposal_id), &proposal);
+        env.storage()
+            .instance()
+            .set(&DataKey::NextProposalId, &(proposal_id + 1));
+
+        Ok(proposal_id)
+    }
+
+    /// Approve a proposal. The approver must be a valid signer. A signer can
+    /// only approve once. Returns true if the proposal now has enough approvals
+    /// to execute.
+    pub fn approve(env: Env, proposal_id: u64, approver: Address) -> Result<bool, Error> {
+        let current_ledger = env.ledger().sequence();
+
+        let mut proposal: Proposal = env
+            .storage()
+            .instance()
+            .get(&DataKey::Proposal(proposal_id))
+            .ok_or(Error::ProposalNotFound)?;
+
+        if current_ledger >= proposal.expiry {
+            return Err(Error::ExpiredProposal);
+        }
+
+        let signers: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Signers)
+            .ok_or(Error::NotInitialized)?;
+
+        // Verify approver is in the signer set.
+        let mut is_valid_signer = false;
+        for i in 0..signers.len() {
+            if signers.get(i).unwrap() == approver {
+                is_valid_signer = true;
+                break;
+            }
+        }
+        if !is_valid_signer {
+            return Err(Error::ThresholdNotMet);
+        }
+
+        // Check if already approved.
+        for i in 0..proposal.approvals.len() {
+            if proposal.approvals.get(i).unwrap() == approver {
+                return Ok(false);
+            }
+        }
+
+        proposal.approvals.push_back(approver);
+        env.storage()
+            .instance()
+            .set(&DataKey::Proposal(proposal_id), &proposal);
+
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Threshold)
+            .ok_or(Error::NotInitialized)?;
+
+        Ok(proposal.approvals.len() as u32 >= threshold)
+    }
+
+    /// Execute a proposal. Requires that it has at least `threshold` approvals
+    /// and has not expired. After execution, the proposal is deleted.
+    pub fn execute(env: Env, proposal_id: u64) -> Result<(), Error> {
+        let current_ledger = env.ledger().sequence();
+
+        let proposal: Proposal = env
+            .storage()
+            .instance()
+            .get(&DataKey::Proposal(proposal_id))
+            .ok_or(Error::ProposalNotFound)?;
+
+        if current_ledger >= proposal.expiry {
+            return Err(Error::ExpiredProposal);
+        }
+
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Threshold)
+            .ok_or(Error::NotInitialized)?;
+
+        if (proposal.approvals.len() as u32) < threshold {
+            return Err(Error::ThresholdNotMet);
+        }
+
+        env.storage()
+            .instance()
+            .remove(&DataKey::Proposal(proposal_id));
+
+        Ok(())
+    }
+
+    /// Get the details of a proposal (payload, expiry, current approvals).
+    pub fn get_proposal(
+        env: Env,
+        proposal_id: u64,
+    ) -> Result<(soroban_sdk::Bytes, u32, Vec<Address>), Error> {
+        let proposal: Proposal = env
+            .storage()
+            .instance()
+            .get(&DataKey::Proposal(proposal_id))
+            .ok_or(Error::ProposalNotFound)?;
+        Ok((proposal.payload, proposal.expiry, proposal.approvals))
     }
 }
 

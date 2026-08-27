@@ -24,7 +24,9 @@ contribution are also tagged `good first issue`.
    ```
    This rebuilds all contracts to wasm and extracts each contract's Soroban
    XDR interface spec into `docs/interfaces/`.  Commit the updated files.
-6. **Before submitting a PR, run:**
+6. **If you've bumped the workspace version in `Cargo.toml`**, add a corresponding entry to `CHANGELOG.md`. CI enforces this via `./scripts/check-changelog.sh`, which ensures every version bump is accompanied by a changelog entry.
+
+7. **Before submitting a PR, run:**
    ```sh
    make test
    make lint
