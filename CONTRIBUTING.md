@@ -76,6 +76,16 @@ welcome to jump back in on something else.
   cause the whole invocation to revert — Soroban rolls back events emitted
   during any invocation that ultimately fails.
 
+## Verifying reproducible builds
+
+The contracts are intended to be reproducible builds — meaning the wasm binaries should be identical byte-for-byte when built in isolated environments. To verify this locally:
+
+```sh
+./scripts/verify-reproducible-builds.sh
+```
+
+This script builds each contract twice in isolated Docker containers and compares the resulting wasm binaries. All contracts should produce matching SHA256 hashes. Reproducible builds let external parties (issuers deploying these contracts) independently verify that the wasm they're using matches this repository's source.
+
 ## Questions
 
 Open an issue with your question, or comment on the relevant existing issue.
