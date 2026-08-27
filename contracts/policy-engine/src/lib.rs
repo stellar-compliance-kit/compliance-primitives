@@ -111,6 +111,7 @@ pub enum Error {
     AlreadyInitialized = 2,
     NotAuthorized = 3,
     PolicyViolation = 4,
+    ContractPaused = 5,
 }
 
 /// Emitted by `evaluate` regardless of the pass/fail outcome so that
@@ -123,6 +124,12 @@ pub struct PolicyResult {
     pub from: Address,
     pub to: Address,
 }
+
+#[contractevent]
+pub struct Paused;
+
+#[contractevent]
+pub struct Unpaused;
 
 /// Carries information about which check in the list failed and what kind it
 /// was. Serializable on-chain; can be embedded in future error events or
@@ -163,12 +170,34 @@ impl PolicyEngine {
         Ok(())
     }
 
+    /// Pause policy mutations (`add_check` / `remove_check`). Admin-only.
+    pub fn pause(env: Env, admin: Address) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        compliance_pausable::pause(&env);
+        Paused.publish(&env);
+        Ok(())
+    }
+
+    /// Resume policy mutations after a pause. Admin-only.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        compliance_pausable::unpause(&env);
+        Unpaused.publish(&env);
+        Ok(())
+    }
+
+    /// Check if the contract is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        compliance_pausable::is_paused(&env)
+    }
+
     // -----------------------------------------------------------------------
     // Admin mutations
     // -----------------------------------------------------------------------
 
     /// Append a new `check` to the end of the policy list. Admin-only.
     pub fn add_check(env: Env, admin: Address, check: CheckKind) -> Result<(), Error> {
+        compliance_pausable::require_not_paused(&env, Error::ContractPaused)?;
         Self::require_admin(&env, &admin)?;
         let mut checks: Vec<CheckKind> = env
             .storage()
@@ -183,6 +212,7 @@ impl PolicyEngine {
     /// Remove the check at position `index` from the policy list.
     /// Admin-only. Indices shift down after removal (Vec::remove semantics).
     pub fn remove_check(env: Env, admin: Address, index: u32) -> Result<(), Error> {
+        compliance_pausable::require_not_paused(&env, Error::ContractPaused)?;
         Self::require_admin(&env, &admin)?;
         let mut checks: Vec<CheckKind> = env
             .storage()

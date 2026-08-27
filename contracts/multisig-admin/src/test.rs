@@ -212,3 +212,85 @@ fn test_signer_update_requires_multisig_auth() {
     // A separate rejection test for the threshold path is
     // test_threshold_not_met_error_value above.
 }
+
+// ---------------------------------------------------------------------------
+// Pausable tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_is_paused_defaults_to_false() {
+    let env = Env::default();
+    let (_signers, _id, client) = setup_multisig(&env, 2, 1);
+    assert!(!client.is_paused());
+}
+
+#[test]
+fn test_pause_and_unpause() {
+    let env = Env::default();
+    let (_signers, _id, client) = setup_multisig(&env, 2, 1);
+
+    client.pause();
+    assert!(client.is_paused());
+
+    client.unpause();
+    assert!(!client.is_paused());
+}
+
+#[test]
+fn test_add_signer_rejected_while_paused() {
+    let env = Env::default();
+    let (_signers, _id, client) = setup_multisig(&env, 2, 1);
+
+    client.pause();
+
+    let new_signer = Address::generate(&env);
+    let result = client.try_add_signer(&new_signer);
+    assert_eq!(result, Err(Ok(Error::ContractPaused)));
+}
+
+#[test]
+fn test_remove_signer_rejected_while_paused() {
+    let env = Env::default();
+    let (signers, _id, client) = setup_multisig(&env, 2, 1);
+
+    client.pause();
+
+    let result = client.try_remove_signer(&signers.get(0).unwrap());
+    assert_eq!(result, Err(Ok(Error::ContractPaused)));
+}
+
+#[test]
+fn test_update_threshold_rejected_while_paused() {
+    let env = Env::default();
+    let (_signers, _id, client) = setup_multisig(&env, 2, 1);
+
+    client.pause();
+
+    let result = client.try_update_threshold(&1u32);
+    assert_eq!(result, Err(Ok(Error::ContractPaused)));
+}
+
+#[test]
+fn test_mutations_succeed_after_unpause() {
+    let env = Env::default();
+    let (_signers, _id, client) = setup_multisig(&env, 2, 1);
+
+    client.pause();
+    client.unpause();
+
+    let new_signer = Address::generate(&env);
+    client.add_signer(&new_signer);
+    assert_eq!(client.get_signers().len(), 3);
+}
+
+#[test]
+fn test_read_methods_succeed_while_paused() {
+    let env = Env::default();
+    let (signers, _id, client) = setup_multisig(&env, 2, 1);
+
+    client.pause();
+
+    assert_eq!(client.get_threshold(), 1u32);
+    let stored = client.get_signers();
+    assert_eq!(stored.len(), signers.len());
+}

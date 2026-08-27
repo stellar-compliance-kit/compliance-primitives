@@ -95,6 +95,12 @@ pub struct ComplianceEvent {
     pub detail: String,
 }
 
+#[contractevent]
+pub struct Paused;
+
+#[contractevent]
+pub struct Unpaused;
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -106,6 +112,7 @@ pub enum Error {
     NotInitialized = 1,
     AlreadyInitialized = 2,
     NotAuthorized = 3,
+    ContractPaused = 4,
 }
 
 // ---------------------------------------------------------------------------
@@ -154,6 +161,27 @@ impl AuditLog {
         Ok(())
     }
 
+    /// Pause all write operations. Admin-only.
+    pub fn pause(env: Env, admin: Address) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        compliance_pausable::pause(&env);
+        Paused.publish(&env);
+        Ok(())
+    }
+
+    /// Resume write operations after a pause. Admin-only.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        compliance_pausable::unpause(&env);
+        Unpaused.publish(&env);
+        Ok(())
+    }
+
+    /// Check if the contract is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        compliance_pausable::is_paused(&env)
+    }
+
     /// Append a compliance event to the log.
     ///
     /// `source` must authorize this call (i.e. the calling contract must
@@ -167,6 +195,8 @@ impl AuditLog {
         subject: Address,
         detail: String,
     ) -> Result<(), Error> {
+        compliance_pausable::require_not_paused(&env, Error::ContractPaused)?;
+
         // Contract must be initialized before accepting entries.
         if !env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::NotInitialized);
@@ -222,6 +252,19 @@ impl AuditLog {
             .instance()
             .get(&DataKey::EntryCount)
             .unwrap_or(0u64)
+    }
+
+    fn require_admin(env: &Env, admin: &Address) -> Result<(), Error> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        if stored_admin != *admin {
+            return Err(Error::NotAuthorized);
+        }
+        Ok(())
     }
 }
 

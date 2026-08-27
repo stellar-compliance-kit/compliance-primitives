@@ -47,7 +47,7 @@
 
 use soroban_sdk::{
     auth::{Context, CustomAccountInterface},
-    contract, contracterror, contractimpl, contracttype,
+    contract, contracterror, contractevent, contractimpl, contracttype,
     crypto::Hash,
     Address, Env, Vec,
 };
@@ -85,7 +85,19 @@ pub enum Error {
     SignerNotFound = 5,
     /// The address to add is already in the signer set.
     AlreadySigner = 6,
+    /// Contract is paused.
+    ContractPaused = 7,
 }
+
+// ---------------------------------------------------------------------------
+// Events
+// ---------------------------------------------------------------------------
+
+#[contractevent]
+pub struct Paused;
+
+#[contractevent]
+pub struct Unpaused;
 
 // ---------------------------------------------------------------------------
 // Contract
@@ -121,6 +133,27 @@ impl MultisigAdmin {
         Ok(())
     }
 
+    /// Pause the contract to prevent new proposals/approvals. Requires multisig threshold.
+    pub fn pause(env: Env) -> Result<(), Error> {
+        env.current_contract_address().require_auth();
+        compliance_pausable::pause(&env);
+        Paused.publish(&env);
+        Ok(())
+    }
+
+    /// Resume operations after a pause. Requires multisig threshold.
+    pub fn unpause(env: Env) -> Result<(), Error> {
+        env.current_contract_address().require_auth();
+        compliance_pausable::unpause(&env);
+        Unpaused.publish(&env);
+        Ok(())
+    }
+
+    /// Check if the contract is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        compliance_pausable::is_paused(&env)
+    }
+
     // -----------------------------------------------------------------------
     // Signer-set management (all require the current multisig threshold)
     // -----------------------------------------------------------------------
@@ -128,6 +161,7 @@ impl MultisigAdmin {
     /// Add `new_signer` to the signer set. Requires the current M-of-N
     /// threshold to be met (the call goes through `__check_auth`).
     pub fn add_signer(env: Env, new_signer: Address) -> Result<(), Error> {
+        compliance_pausable::require_not_paused(&env, Error::ContractPaused)?;
         // Require auth from this contract itself — satisfied by __check_auth.
         env.current_contract_address().require_auth();
 
@@ -152,6 +186,7 @@ impl MultisigAdmin {
     /// Remove `signer` from the signer set. Requires the current M-of-N
     /// threshold. The resulting signer count must still be >= threshold.
     pub fn remove_signer(env: Env, signer: Address) -> Result<(), Error> {
+        compliance_pausable::require_not_paused(&env, Error::ContractPaused)?;
         env.current_contract_address().require_auth();
 
         let mut signers: Vec<Address> = env
@@ -188,6 +223,7 @@ impl MultisigAdmin {
 
     /// Update the signing threshold. Requires the current M-of-N threshold.
     pub fn update_threshold(env: Env, threshold: u32) -> Result<(), Error> {
+        compliance_pausable::require_not_paused(&env, Error::ContractPaused)?;
         env.current_contract_address().require_auth();
 
         let signers: Vec<Address> = env

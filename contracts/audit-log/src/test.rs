@@ -204,3 +204,114 @@ fn test_double_initialize_fails() {
     let result = client.try_initialize(&admin);
     assert_eq!(result, Err(Ok(Error::AlreadyInitialized)));
 }
+
+#[test]
+fn test_is_paused_defaults_to_false() {
+    let env = Env::default();
+    let (_admin, _contract_id, client) = setup(&env);
+    assert!(!client.is_paused());
+}
+
+#[test]
+fn test_pause_and_unpause() {
+    let env = Env::default();
+    let (admin, _contract_id, client) = setup(&env);
+
+    client.pause(&admin);
+    assert!(client.is_paused());
+
+    client.unpause(&admin);
+    assert!(!client.is_paused());
+}
+
+#[test]
+fn test_record_rejected_while_paused() {
+    let env = Env::default();
+    let (admin, _contract_id, client) = setup(&env);
+
+    let source = Address::generate(&env);
+    let subject = Address::generate(&env);
+    let kind = Symbol::new(&env, "deny_add");
+    let detail = soroban_sdk::String::from_str(&env, "test");
+
+    client.pause(&admin);
+
+    let result = client.try_record(&source, &kind, &subject, &detail);
+    assert_eq!(result, Err(Ok(Error::ContractPaused)));
+}
+
+#[test]
+fn test_record_succeeds_after_unpause() {
+    let env = Env::default();
+    let (admin, _contract_id, client) = setup(&env);
+
+    let source = Address::generate(&env);
+    let subject = Address::generate(&env);
+    let kind = Symbol::new(&env, "deny_add");
+    let detail = soroban_sdk::String::from_str(&env, "test");
+
+    client.pause(&admin);
+    client.unpause(&admin);
+
+    client.record(&source, &kind, &subject, &detail);
+    let entry = client.get_entry(&0u64).expect("entry must exist");
+    assert_eq!(entry.source, source);
+}
+
+#[test]
+fn test_read_methods_succeed_while_paused() {
+    let env = Env::default();
+    let (admin, _contract_id, client) = setup(&env);
+
+    let source = Address::generate(&env);
+    let subject = Address::generate(&env);
+    let kind = Symbol::new(&env, "deny_add");
+    let detail = soroban_sdk::String::from_str(&env, "test");
+
+    client.record(&source, &kind, &subject, &detail);
+    client.pause(&admin);
+
+    assert_eq!(client.entry_count(), 1u64);
+    assert!(client.get_entry(&0u64).is_some());
+}
+
+#[test]
+fn test_pause_emits_event() {
+    let env = Env::default();
+    let (admin, contract_id, client) = setup(&env);
+
+    client.pause(&admin);
+
+    let events = env.events().all();
+    // Should have the ComplianceEvent from initialize and the Paused event
+    // Just verify the Paused event is present
+    assert!(events.iter().any(|(_, _, e)| {
+        e.to_string().contains("Paused")
+    }));
+}
+
+#[test]
+fn test_unpause_emits_event() {
+    let env = Env::default();
+    let (admin, contract_id, client) = setup(&env);
+
+    client.pause(&admin);
+    env.events().clear();
+    client.unpause(&admin);
+
+    let events = env.events().all();
+    assert!(!events.is_empty());
+    assert!(events.iter().any(|(_, _, e)| {
+        e.to_string().contains("Unpaused")
+    }));
+}
+
+#[test]
+fn test_non_admin_cannot_pause() {
+    let env = Env::default();
+    let (admin, _contract_id, client) = setup(&env);
+
+    let non_admin = Address::generate(&env);
+    let result = client.try_pause(&non_admin);
+    assert_eq!(result, Err(Ok(Error::NotAuthorized)));
+}

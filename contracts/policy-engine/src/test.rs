@@ -219,3 +219,123 @@ fn test_add_and_remove_check() {
     client.remove_check(&admin, &0);
     assert_eq!(client.get_checks().len(), 1);
 }
+
+#[test]
+fn test_is_paused_defaults_to_false() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, _engine_id, client) = setup_engine_all(&env);
+    assert!(!client.is_paused());
+}
+
+#[test]
+fn test_pause_and_unpause() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, _engine_id, client) = setup_engine_all(&env);
+
+    client.pause(&admin);
+    assert!(client.is_paused());
+
+    client.unpause(&admin);
+    assert!(!client.is_paused());
+}
+
+#[test]
+fn test_add_check_rejected_while_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, _engine_id, client) = setup_engine_all(&env);
+
+    let deny_admin = Address::generate(&env);
+    let deny_id = setup_denylist(&env, &deny_admin);
+
+    client.pause(&admin);
+
+    let result = client.try_add_check(
+        &admin,
+        &CheckKind::Denylist {
+            contract: deny_id.clone(),
+        },
+    );
+    assert_eq!(result, Err(Ok(Error::ContractPaused)));
+}
+
+#[test]
+fn test_remove_check_rejected_while_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, _engine_id, client) = setup_engine_all(&env);
+
+    let deny_admin = Address::generate(&env);
+    let deny_id = setup_denylist(&env, &deny_admin);
+
+    client.add_check(
+        &admin,
+        &CheckKind::Denylist {
+            contract: deny_id.clone(),
+        },
+    );
+
+    client.pause(&admin);
+
+    let result = client.try_remove_check(&admin, &0);
+    assert_eq!(result, Err(Ok(Error::ContractPaused)));
+}
+
+#[test]
+fn test_mutations_succeed_after_unpause() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, _engine_id, client) = setup_engine_all(&env);
+
+    let deny_admin = Address::generate(&env);
+    let deny_id = setup_denylist(&env, &deny_admin);
+
+    client.pause(&admin);
+    client.unpause(&admin);
+
+    client.add_check(
+        &admin,
+        &CheckKind::Denylist {
+            contract: deny_id.clone(),
+        },
+    );
+    assert_eq!(client.get_checks().len(), 1);
+}
+
+#[test]
+fn test_read_methods_succeed_while_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, _engine_id, client) = setup_engine_all(&env);
+
+    let deny_admin = Address::generate(&env);
+    let deny_id = setup_denylist(&env, &deny_admin);
+
+    client.add_check(
+        &admin,
+        &CheckKind::Denylist {
+            contract: deny_id.clone(),
+        },
+    );
+
+    client.pause(&admin);
+
+    let checks = client.get_checks();
+    assert_eq!(checks.len(), 1);
+
+    let op = client.get_op();
+    assert_eq!(op.unwrap(), CombineOp::All);
+}
+
+#[test]
+fn test_non_admin_cannot_pause() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, _engine_id, client) = setup_engine_all(&env);
+
+    let non_admin = Address::generate(&env);
+    let result = client.try_pause(&non_admin);
+    assert_eq!(result, Err(Ok(Error::NotAuthorized)));
+}
