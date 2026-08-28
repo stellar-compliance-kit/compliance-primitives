@@ -3,11 +3,18 @@ resolver = "2"
 members = [
     "contracts/allowlist-token",
     "contracts/audit-log",
+    "contracts/circuit-breaker",
+    "contracts/compliance-aggregator",
     "contracts/denylist-gate",
     "contracts/jurisdiction-flag",
-    "contracts/circuit-breaker",
+    "contracts/multisig-admin",
+    "contracts/policy-engine",
     "examples/denylist-gate-consumer",
+    "examples/denylist-gate-sep41",
     "examples/jurisdiction-denylist-consumer",
+    "examples/jurisdiction-flag-consumer",
+    "examples/rwa-compliance-flow",
+    "examples/rwa-token",
 ]
 
 [workspace.package]

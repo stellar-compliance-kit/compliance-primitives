@@ -10,6 +10,14 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  workspace-members:
+    name: workspace members check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check every contracts/ and examples/ crate is a workspace member
+        run: ./scripts/check-workspace-members.sh
+
   test:
     name: cargo test
     runs-on: ubuntu-latest
