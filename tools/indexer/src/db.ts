@@ -14,11 +14,19 @@
  *   timestamp       INTEGER            — Unix seconds (ledger close time)
  *   contract_id     TEXT NOT NULL
  *   event_type      TEXT NOT NULL      — AllowAdd | AllowRemove | Blocked |
- *                                        DenyAdd | DenyRemove | JurisdictionSet
- *   address         TEXT               — primary subject address
+ *                                        DenyAdd | DenyRemove | JurisdictionSet |
+ *                                        AdminSet | DenylistGateSet |
+ *                                        JurisdictionFlagSet | PolicyResult |
+ *                                        Frozen | Unfrozen
+ *   address         TEXT               — primary subject address; also holds the
+ *                                        newly configured address for aggregator
+ *                                        config events (AdminSet etc.)
  *   address_to      TEXT               — secondary address (Blocked only)
  *   amount          TEXT               — i128 as decimal string (Blocked only)
  *   jurisdiction    TEXT               — ISO code (JurisdictionSet only)
+ *   policy_from     TEXT               — sender address (PolicyResult only)
+ *   policy_to       TEXT               — receiver address (PolicyResult only)
+ *   policy_passed   INTEGER            — 1=pass, 0=fail, NULL otherwise
  *   raw_topics      TEXT NOT NULL      — JSON array of base64-XDR topic strings
  *   raw_data        TEXT NOT NULL      — base64-XDR data value
  *
@@ -38,6 +46,16 @@
  *   code        TEXT NOT NULL
  *   PRIMARY KEY (contract_id, address)
  *
+ * aggregator_config  — current gate/flag addresses per aggregator contract
+ *   contract_id      TEXT NOT NULL     — the aggregator contract
+ *   config_key       TEXT NOT NULL     — "admin" | "denylist_gate" | "jurisdiction_flag"
+ *   config_address   TEXT NOT NULL     — the currently configured address
+ *   PRIMARY KEY (contract_id, config_key)
+ *
+ * circuit_breaker_state — current frozen/unfrozen state per circuit-breaker
+ *   contract_id TEXT PRIMARY KEY
+ *   is_frozen   INTEGER NOT NULL       — 1 = frozen, 0 = unfrozen
+ *
  * indexer_state      — internal key/value (stores last_ledger)
  *   key   TEXT PK
  *   value TEXT NOT NULL
@@ -56,6 +74,12 @@ export interface RawEvent {
   addressTo: string | null;
   amount: string | null;
   jurisdiction: string | null;
+  /** Sender address for PolicyResult events. */
+  policyFrom: string | null;
+  /** Receiver address for PolicyResult events. */
+  policyTo: string | null;
+  /** Pass/fail result for PolicyResult events; null for all other event types. */
+  policyPassed: boolean | null;
   rawTopics: string;
   rawData: string;
 }
@@ -102,6 +126,9 @@ export class ComplianceDb {
         address_to      TEXT,
         amount          TEXT,
         jurisdiction    TEXT,
+        policy_from     TEXT,
+        policy_to       TEXT,
+        policy_passed   INTEGER,
         raw_topics      TEXT    NOT NULL,
         raw_data        TEXT    NOT NULL
       );
@@ -114,6 +141,10 @@ export class ComplianceDb {
         ON events (event_type);
       CREATE INDEX IF NOT EXISTS idx_events_ledger
         ON events (ledger_sequence);
+      CREATE INDEX IF NOT EXISTS idx_events_policy_from
+        ON events (policy_from);
+      CREATE INDEX IF NOT EXISTS idx_events_policy_to
+        ON events (policy_to);
 
       CREATE TABLE IF NOT EXISTS allowlist (
         contract_id TEXT NOT NULL,
@@ -132,6 +163,18 @@ export class ComplianceDb {
         address     TEXT NOT NULL,
         code        TEXT NOT NULL,
         PRIMARY KEY (contract_id, address)
+      );
+
+      CREATE TABLE IF NOT EXISTS aggregator_config (
+        contract_id    TEXT NOT NULL,
+        config_key     TEXT NOT NULL,
+        config_address TEXT NOT NULL,
+        PRIMARY KEY (contract_id, config_key)
+      );
+
+      CREATE TABLE IF NOT EXISTS circuit_breaker_state (
+        contract_id TEXT PRIMARY KEY,
+        is_frozen   INTEGER NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS indexer_state (
@@ -168,8 +211,10 @@ export class ComplianceDb {
     this.db.run(
       `INSERT INTO events
          (ledger_sequence, timestamp, contract_id, event_type,
-          address, address_to, amount, jurisdiction, raw_topics, raw_data)
-       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+          address, address_to, amount, jurisdiction,
+          policy_from, policy_to, policy_passed,
+          raw_topics, raw_data)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         e.ledgerSequence,
         e.timestamp,
@@ -179,6 +224,9 @@ export class ComplianceDb {
         e.addressTo,
         e.amount,
         e.jurisdiction,
+        e.policyFrom,
+        e.policyTo,
+        e.policyPassed === null ? null : e.policyPassed ? 1 : 0,
         e.rawTopics,
         e.rawData,
       ]
@@ -229,6 +277,56 @@ export class ComplianceDb {
         }
         break;
       // Blocked: recorded in events log only, no state change
+
+      // ── compliance-aggregator configuration events ──────────────────────────
+      case "AdminSet":
+        if (e.address) {
+          this.db.run(
+            `INSERT INTO aggregator_config (contract_id, config_key, config_address) VALUES (?,?,?)
+             ON CONFLICT (contract_id, config_key) DO UPDATE SET config_address = excluded.config_address`,
+            [e.contractId, "admin", e.address]
+          );
+        }
+        break;
+      case "DenylistGateSet":
+        if (e.address) {
+          this.db.run(
+            `INSERT INTO aggregator_config (contract_id, config_key, config_address) VALUES (?,?,?)
+             ON CONFLICT (contract_id, config_key) DO UPDATE SET config_address = excluded.config_address`,
+            [e.contractId, "denylist_gate", e.address]
+          );
+        }
+        break;
+      case "JurisdictionFlagSet":
+        if (e.address) {
+          this.db.run(
+            `INSERT INTO aggregator_config (contract_id, config_key, config_address) VALUES (?,?,?)
+             ON CONFLICT (contract_id, config_key) DO UPDATE SET config_address = excluded.config_address`,
+            [e.contractId, "jurisdiction_flag", e.address]
+          );
+        }
+        break;
+
+      // PolicyResult: recorded in events log only
+      // (policy_from, policy_to, policy_passed columns)
+
+      // ── circuit-breaker state-change events ────────────────────────────────
+      // Upsert so the current freeze state is always queryable:
+      //   SELECT is_frozen FROM circuit_breaker_state WHERE contract_id = ?
+      case "Frozen":
+        this.db.run(
+          `INSERT INTO circuit_breaker_state (contract_id, is_frozen) VALUES (?,1)
+           ON CONFLICT (contract_id) DO UPDATE SET is_frozen = 1`,
+          [e.contractId]
+        );
+        break;
+      case "Unfrozen":
+        this.db.run(
+          `INSERT INTO circuit_breaker_state (contract_id, is_frozen) VALUES (?,0)
+           ON CONFLICT (contract_id) DO UPDATE SET is_frozen = 0`,
+          [e.contractId]
+        );
+        break;
     }
   }
 
