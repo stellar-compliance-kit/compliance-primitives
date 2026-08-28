@@ -8,7 +8,7 @@
  *   topic[1+] = the fields annotated #[topic] in declaration order
  *   data      = ScVal — struct-value encoding of any non-topic fields
  *
- * For the five event types in this repo:
+ * For the five event types from compliance primitives:
  *
  *   AllowAdd        topics: [Symbol("AllowAdd"), Address]          data: Void
  *   AllowRemove     topics: [Symbol("AllowRemove"), Address]        data: Void
@@ -16,6 +16,13 @@
  *   DenyAdd         topics: [Symbol("DenyAdd"), Address]            data: Void
  *   DenyRemove      topics: [Symbol("DenyRemove"), Address]         data: Void
  *   JurisdictionSet topics: [Symbol("JurisdictionSet"), Address]    data: String(code)
+ *
+ * For the four event types from multisig-admin:
+ *
+ *   SignerAdd   topics: [Symbol("SignerAdd"), Address(signer)]   data: Void
+ *   SignerRm    topics: [Symbol("SignerRm"),  Address(signer)]   data: Void
+ *   ThreshSet   topics: [Symbol("ThreshSet")]                    data: U32(threshold)
+ *   AuthOk      topics: [Symbol("AuthOk")]                       data: Vec[U32(valid), U32(threshold)]
  *
  * We parse XDR manually using DataView — no external XDR lib — because the
  * values we need are simple enough and we want zero extra dependencies.
@@ -254,12 +261,18 @@ function base32Encode(data: Uint8Array): string {
 // ─── Event decoding ───────────────────────────────────────────────────────────
 
 const KNOWN_EVENTS = new Set([
+  // compliance-primitives events
   "AllowAdd",
   "AllowRemove",
   "Blocked",
   "DenyAdd",
   "DenyRemove",
   "JurisdictionSet",
+  // multisig-admin events
+  "SignerAdd",
+  "SignerRm",
+  "ThreshSet",
+  "AuthOk",
 ]);
 
 export function decodeEvent(
@@ -267,7 +280,7 @@ export function decodeEvent(
 ): RawEvent | null {
   try {
     // topics is an array of base64 XDR ScVal strings
-    if (!raw.topic || raw.topic.length < 2) return null;
+    if (!raw.topic || raw.topic.length < 1) return null;
 
     const topics = raw.topic.map((t) => decodeScVal(new XdrReader(base64ToBytes(t))));
 
@@ -277,48 +290,126 @@ export function decodeEvent(
     const eventType = nameVal.value;
     if (!KNOWN_EVENTS.has(eventType)) return null;
 
-    // topics[1] is always the primary address
-    const addrVal = topics[1];
-    if (addrVal.type !== "Address") return null;
-    const address = addrVal.value;
-
-    let addressTo: string | null = null;
-    let amount: string | null = null;
-    let jurisdiction: string | null = null;
-
-    // Decode data field
+    // Decode data field once — used by multiple branches below
     const dataVal =
       raw.value
         ? decodeScVal(new XdrReader(base64ToBytes(raw.value)))
         : { type: "Void" as const };
 
-    if (eventType === "Blocked") {
-      // topics[2] = to address
-      const toVal = topics[2];
-      if (toVal?.type === "Address") addressTo = toVal.value;
-      if (dataVal.type === "I128") amount = dataVal.value.toString();
+    // ── compliance-primitives events ─────────────────────────────────────────
+
+    if (
+      eventType === "AllowAdd" ||
+      eventType === "AllowRemove" ||
+      eventType === "Blocked" ||
+      eventType === "DenyAdd" ||
+      eventType === "DenyRemove" ||
+      eventType === "JurisdictionSet"
+    ) {
+      // topics[1] is always the primary address for these event types
+      if (raw.topic.length < 2) return null;
+      const addrVal = topics[1];
+      if (addrVal.type !== "Address") return null;
+      const address = addrVal.value;
+
+      let addressTo: string | null = null;
+      let amount: string | null = null;
+      let jurisdiction: string | null = null;
+
+      if (eventType === "Blocked") {
+        const toVal = topics[2];
+        if (toVal?.type === "Address") addressTo = toVal.value;
+        if (dataVal.type === "I128") amount = dataVal.value.toString();
+      }
+
+      if (eventType === "JurisdictionSet") {
+        if (dataVal.type === "String") jurisdiction = dataVal.value;
+      }
+
+      const timestamp = raw.ledgerClosedAt
+        ? Math.floor(new Date(raw.ledgerClosedAt).getTime() / 1000)
+        : null;
+
+      return {
+        ledgerSequence: raw.ledger,
+        timestamp,
+        contractId: raw.contractId,
+        eventType,
+        address,
+        addressTo,
+        amount,
+        jurisdiction,
+        signerAddress: null,
+        newThreshold: null,
+        validCount: null,
+        rawTopics: JSON.stringify(raw.topic),
+        rawData: raw.value ?? "",
+      };
     }
 
-    if (eventType === "JurisdictionSet") {
-      if (dataVal.type === "String") jurisdiction = dataVal.value;
-    }
+    // ── multisig-admin events ─────────────────────────────────────────────────
 
     const timestamp = raw.ledgerClosedAt
       ? Math.floor(new Date(raw.ledgerClosedAt).getTime() / 1000)
       : null;
 
-    return {
+    const base = {
       ledgerSequence: raw.ledger,
       timestamp,
       contractId: raw.contractId,
       eventType,
-      address,
-      addressTo,
-      amount,
-      jurisdiction,
+      address: null,
+      addressTo: null,
+      amount: null,
+      jurisdiction: null,
       rawTopics: JSON.stringify(raw.topic),
       rawData: raw.value ?? "",
-    };
+    } as const;
+
+    if (eventType === "SignerAdd" || eventType === "SignerRm") {
+      // topics: [Symbol, Address(signer)]
+      if (raw.topic.length < 2) return null;
+      const signerVal = topics[1];
+      if (signerVal.type !== "Address") return null;
+      return {
+        ...base,
+        signerAddress: signerVal.value,
+        newThreshold: null,
+        validCount: null,
+      };
+    }
+
+    if (eventType === "ThreshSet") {
+      // topics: [Symbol]  data: U32(threshold)
+      if (dataVal.type !== "U32") return null;
+      return {
+        ...base,
+        signerAddress: null,
+        newThreshold: dataVal.value,
+        validCount: null,
+      };
+    }
+
+    if (eventType === "AuthOk") {
+      // topics: [Symbol]  data: Vec[U32(valid_count), U32(threshold)]
+      // The Soroban SDK encodes a Rust tuple (u32, u32) as a two-element ScVec.
+      let validCount: number | null = null;
+      let newThreshold: number | null = null;
+      if (dataVal.type === "Vec" && dataVal.value.length === 2) {
+        const v0 = dataVal.value[0];
+        const v1 = dataVal.value[1];
+        if (v0.type === "U32") validCount = v0.value;
+        if (v1.type === "U32") newThreshold = v1.value;
+      }
+      return {
+        ...base,
+        signerAddress: null,
+        newThreshold,
+        validCount,
+      };
+    }
+
+    return null;
   } catch (err) {
     console.error(`Failed to decode event from contract ${raw.contractId}:`, err);
     return null;
