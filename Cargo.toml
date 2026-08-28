@@ -6,8 +6,14 @@ members = [
     "contracts/denylist-gate",
     "contracts/jurisdiction-flag",
     "contracts/circuit-breaker",
+    "contracts/compliance-aggregator",
+    "contracts/multisig-admin",
+    "contracts/policy-engine",
     "examples/denylist-gate-consumer",
     "examples/jurisdiction-denylist-consumer",
+    "examples/jurisdiction-flag-consumer",
+    "examples/multisig-aggregator",
+    "examples/policy-engine-audit",
 ]
 
 [workspace.package]
