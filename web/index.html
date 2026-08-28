@@ -1,7 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
 <title>compliance-primitives — on-chain compliance for Stellar</title>
 <meta name="description" content="On-chain compliance primitives for Stellar: allowlist/denylist token gating and jurisdiction checks for RWA and stablecoin issuers, built on Soroban.">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<meta property="og:type" content="website">
+<meta property="og:title" content="compliance-primitives — on-chain compliance for Stellar">
+<meta property="og:description" content="Auditable Soroban contracts for allowlists, denylists, jurisdiction checks, and composable compliance.">
+<meta property="og:image" content="architecture.svg">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="compliance-primitives — on-chain compliance for Stellar">
+<meta name="twitter:description" content="Auditable Soroban contracts for composable on-chain compliance.">
+<meta name="twitter:image" content="architecture.svg">
 <link rel="stylesheet" href="styles.css">
+</head>
+<body>
 
 <nav>
   <div class="wrap">
@@ -9,6 +24,8 @@
     <div class="nav-links">
       <a href="#contracts">Contracts</a>
       <a href="#architecture">Architecture</a>
+      <a href="architecture.html">Diagram</a>
+      <a href="changelog.html">Changelog</a>
       <a href="#quick-start">Quick start</a>
       <a href="https://github.com/stellar-compliance-kit/compliance-primitives">GitHub</a>
     </div>
@@ -49,10 +66,13 @@
 
 <section id="contracts">
   <div class="wrap">
-    <h2>Three focused contracts</h2>
-    <p>Each does one job, and each is independently deployable and testable.</p>
+    <h2>Contract explorer</h2>
+    <p>Each primitive does one job, and each is independently deployable and testable.</p>
+    <label class="search-label" for="contract-search">Search contracts and entrypoints</label>
+    <input id="contract-search" class="search-input" type="search" data-search placeholder="Try ‘denylist’ or ‘jurisdiction’" autocomplete="off">
+    <p class="search-empty" data-search-empty hidden>No matching contracts or entrypoints.</p>
     <div class="cards">
-      <div class="card">
+      <div class="card" data-search-item>
         <h3>allowlist-token</h3>
         <p>
           A token wrapper that only permits transfers between two addresses
@@ -67,7 +87,7 @@
           <code>transfer(from, to, amount) -&gt; bool</code>
         </div>
       </div>
-      <div class="card">
+      <div class="card" data-search-item>
         <h3>denylist-gate</h3>
         <p>
           A standalone denylist other contracts call via cross-contract
@@ -81,7 +101,7 @@
           <code>check(address) -&gt; bool</code>
         </div>
       </div>
-      <div class="card">
+      <div class="card" data-search-item>
         <h3>jurisdiction-flag</h3>
         <p>
           Attaches an issuer-controlled jurisdiction code (e.g. an ISO
@@ -95,6 +115,12 @@
           <code>is_permitted_jurisdiction(address, allowed_codes) -&gt; bool</code>
         </div>
       </div>
+      <div class="card" data-search-item><h3>audit-log</h3><p>Records compliance decisions and operational events for auditability.</p><span class="tag">auditable</span><div class="fns"><code>record_event(admin, subject, decision)</code></div></div>
+      <div class="card" data-search-item><h3>circuit-breaker</h3><p>Provides an emergency stop when automated or governance-defined conditions are met.</p><span class="tag">emergency control</span><div class="fns"><code>trip(admin)</code><code>is_tripped() -&gt; bool</code></div></div>
+      <div class="card" data-search-item><h3>compliance-aggregator</h3><p>Combines multiple compliance checks into one composable decision point.</p><span class="tag">composition</span><div class="fns"><code>check(address) -&gt; bool</code></div></div>
+      <div class="card" data-search-item><h3>multisig-admin</h3><p>Protects administrative operations with multi-signature approval.</p><span class="tag">governance</span><div class="fns"><code>approve(operation)</code><code>execute(operation)</code></div></div>
+      <div class="card" data-search-item><h3>pausable</h3><p>Exposes a controlled pause state for contracts that need operational safety controls.</p><span class="tag">emergency control</span><div class="fns"><code>pause(admin)</code><code>unpause(admin)</code></div></div>
+      <div class="card" data-search-item><h3>policy-engine</h3><p>Evaluates configurable policy rules before an application permits a transfer.</p><span class="tag">rules</span><div class="fns"><code>evaluate(subject, action) -&gt; bool</code></div></div>
     </div>
   </div>
 </section>
@@ -167,3 +193,6 @@ stellar contract deploy \
     </div>
   </div>
 </footer>
+<script src="app.js" defer></script>
+</body>
+</html>
