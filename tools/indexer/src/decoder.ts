@@ -8,7 +8,7 @@
  *   topic[1+] = the fields annotated #[topic] in declaration order
  *   data      = ScVal — struct-value encoding of any non-topic fields
  *
- * For the five event types in this repo:
+ * For the six event types from compliance primitives:
  *
  *   AllowAdd        topics: [Symbol("AllowAdd"), Address]          data: Void
  *   AllowRemove     topics: [Symbol("AllowRemove"), Address]        data: Void
@@ -16,6 +16,17 @@
  *   DenyAdd         topics: [Symbol("DenyAdd"), Address]            data: Void
  *   DenyRemove      topics: [Symbol("DenyRemove"), Address]         data: Void
  *   JurisdictionSet topics: [Symbol("JurisdictionSet"), Address]    data: String(code)
+ *
+ * For the three configuration events from compliance-aggregator:
+ *
+ *   AdminSet            topics: [Symbol("AdminSet"),            Address(admin)]  data: Void
+ *   DenylistGateSet     topics: [Symbol("DenylistGateSet"),     Address(gate)]   data: Void
+ *   JurisdictionFlagSet topics: [Symbol("JurisdictionFlagSet"), Address(flag)]   data: Void
+ *
+ * For the evaluation event from policy-engine:
+ *
+ *   PolicyResult  topics: [Symbol("PolicyResult"), Bool(passed)]
+ *                 data:   Vec[Address(from), Address(to)]
  *
  * We parse XDR manually using DataView — no external XDR lib — because the
  * values we need are simple enough and we want zero extra dependencies.
@@ -128,6 +139,7 @@ class XdrReader {
 
 type ScVal =
   | { type: "Void" }
+  | { type: "Bool"; value: boolean }
   | { type: "Symbol"; value: string }
   | { type: "String"; value: string }
   | { type: "Address"; value: string }
@@ -139,6 +151,9 @@ type ScVal =
 function decodeScVal(r: XdrReader): ScVal {
   const disc = r.readU32();
   switch (disc) {
+    case ScType.Bool:
+      return { type: "Bool", value: r.readU32() !== 0 };
+
     case ScType.Void:
       return { type: "Void" };
 
@@ -254,12 +269,19 @@ function base32Encode(data: Uint8Array): string {
 // ─── Event decoding ───────────────────────────────────────────────────────────
 
 const KNOWN_EVENTS = new Set([
+  // compliance-primitives events
   "AllowAdd",
   "AllowRemove",
   "Blocked",
   "DenyAdd",
   "DenyRemove",
   "JurisdictionSet",
+  // compliance-aggregator configuration events
+  "AdminSet",
+  "DenylistGateSet",
+  "JurisdictionFlagSet",
+  // policy-engine evaluation event
+  "PolicyResult",
 ]);
 
 export function decodeEvent(
@@ -267,7 +289,7 @@ export function decodeEvent(
 ): RawEvent | null {
   try {
     // topics is an array of base64 XDR ScVal strings
-    if (!raw.topic || raw.topic.length < 2) return null;
+    if (!raw.topic || raw.topic.length < 1) return null;
 
     const topics = raw.topic.map((t) => decodeScVal(new XdrReader(base64ToBytes(t))));
 
@@ -277,48 +299,136 @@ export function decodeEvent(
     const eventType = nameVal.value;
     if (!KNOWN_EVENTS.has(eventType)) return null;
 
-    // topics[1] is always the primary address
-    const addrVal = topics[1];
-    if (addrVal.type !== "Address") return null;
-    const address = addrVal.value;
-
-    let addressTo: string | null = null;
-    let amount: string | null = null;
-    let jurisdiction: string | null = null;
-
-    // Decode data field
+    // Decode data field once — used by multiple branches below
     const dataVal =
       raw.value
         ? decodeScVal(new XdrReader(base64ToBytes(raw.value)))
         : { type: "Void" as const };
 
-    if (eventType === "Blocked") {
-      // topics[2] = to address
-      const toVal = topics[2];
-      if (toVal?.type === "Address") addressTo = toVal.value;
-      if (dataVal.type === "I128") amount = dataVal.value.toString();
-    }
-
-    if (eventType === "JurisdictionSet") {
-      if (dataVal.type === "String") jurisdiction = dataVal.value;
-    }
-
     const timestamp = raw.ledgerClosedAt
       ? Math.floor(new Date(raw.ledgerClosedAt).getTime() / 1000)
       : null;
 
-    return {
-      ledgerSequence: raw.ledger,
-      timestamp,
-      contractId: raw.contractId,
-      eventType,
-      address,
-      addressTo,
-      amount,
-      jurisdiction,
-      rawTopics: JSON.stringify(raw.topic),
-      rawData: raw.value ?? "",
-    };
+    // ── compliance-primitives events ─────────────────────────────────────────
+
+    if (
+      eventType === "AllowAdd" ||
+      eventType === "AllowRemove" ||
+      eventType === "Blocked" ||
+      eventType === "DenyAdd" ||
+      eventType === "DenyRemove" ||
+      eventType === "JurisdictionSet"
+    ) {
+      // topics[1] is always the primary address for these event types
+      if (raw.topic.length < 2) return null;
+      const addrVal = topics[1];
+      if (addrVal.type !== "Address") return null;
+      const address = addrVal.value;
+
+      let addressTo: string | null = null;
+      let amount: string | null = null;
+      let jurisdiction: string | null = null;
+
+      if (eventType === "Blocked") {
+        const toVal = topics[2];
+        if (toVal?.type === "Address") addressTo = toVal.value;
+        if (dataVal.type === "I128") amount = dataVal.value.toString();
+      }
+
+      if (eventType === "JurisdictionSet") {
+        if (dataVal.type === "String") jurisdiction = dataVal.value;
+      }
+
+      return {
+        ledgerSequence: raw.ledger,
+        timestamp,
+        contractId: raw.contractId,
+        eventType,
+        address,
+        addressTo,
+        amount,
+        jurisdiction,
+        policyFrom: null,
+        policyTo: null,
+        policyPassed: null,
+        rawTopics: JSON.stringify(raw.topic),
+        rawData: raw.value ?? "",
+      };
+    }
+
+    // ── compliance-aggregator configuration events ────────────────────────────
+    //
+    // AdminSet, DenylistGateSet, JurisdictionFlagSet all share the same shape:
+    //   topics: [Symbol(name), Address(configured_contract_or_admin)]
+    //   data:   Void
+
+    if (
+      eventType === "AdminSet" ||
+      eventType === "DenylistGateSet" ||
+      eventType === "JurisdictionFlagSet"
+    ) {
+      if (raw.topic.length < 2) return null;
+      const addrVal = topics[1];
+      if (addrVal.type !== "Address") return null;
+
+      return {
+        ledgerSequence: raw.ledger,
+        timestamp,
+        contractId: raw.contractId,
+        eventType,
+        // Reuse `address` to hold the newly configured admin/gate/flag address
+        address: addrVal.value,
+        addressTo: null,
+        amount: null,
+        jurisdiction: null,
+        policyFrom: null,
+        policyTo: null,
+        policyPassed: null,
+        rawTopics: JSON.stringify(raw.topic),
+        rawData: raw.value ?? "",
+      };
+    }
+
+    // ── policy-engine evaluation event ───────────────────────────────────────
+    //
+    // PolicyResult:
+    //   topics: [Symbol("PolicyResult"), Bool(passed)]
+    //   data:   Vec[Address(from), Address(to)]
+
+    if (eventType === "PolicyResult") {
+      if (raw.topic.length < 2) return null;
+      const passedVal = topics[1];
+      if (passedVal.type !== "Bool") return null;
+
+      let policyFrom: string | null = null;
+      let policyTo: string | null = null;
+
+      // data is Vec[Address(from), Address(to)]
+      if (dataVal.type === "Vec" && dataVal.value.length >= 2) {
+        const fromVal = dataVal.value[0];
+        const toVal = dataVal.value[1];
+        if (fromVal.type === "Address") policyFrom = fromVal.value;
+        if (toVal.type === "Address") policyTo = toVal.value;
+      }
+
+      return {
+        ledgerSequence: raw.ledger,
+        timestamp,
+        contractId: raw.contractId,
+        eventType,
+        address: null,
+        addressTo: null,
+        amount: null,
+        jurisdiction: null,
+        policyFrom,
+        policyTo,
+        policyPassed: passedVal.value,
+        rawTopics: JSON.stringify(raw.topic),
+        rawData: raw.value ?? "",
+      };
+    }
+
+    return null;
   } catch (err) {
     console.error(`Failed to decode event from contract ${raw.contractId}:`, err);
     return null;
