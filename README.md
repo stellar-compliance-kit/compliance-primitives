@@ -41,6 +41,18 @@ three primitives in one `transfer` path — see its
 [TESTNET.md](./examples/rwa-token/TESTNET.md) for the testnet reference
 deployment and walkthrough.
 
+### Examples
+
+Each example under `/examples` demonstrates a different composition pattern:
+
+- **[circuit-breaker-policy-engine](./examples/circuit-breaker-policy-engine)** — wires `circuit-breaker` as a pre-check before `policy-engine` evaluation
+- **[denylist-gate-consumer](./examples/denylist-gate-consumer)** — minimal token calling `denylist-gate` and `circuit-breaker` before transfers
+- **[denylist-gate-sep41](./examples/denylist-gate-sep41)** — `denylist-gate` integration for SEP-41 anchor compliance
+- **[jurisdiction-flag-consumer](./examples/jurisdiction-flag-consumer)** — token enforcing jurisdiction-based transfer restrictions
+- **[jurisdiction-denylist-consumer](./examples/jurisdiction-denylist-consumer)** — combines `jurisdiction-flag` and `denylist-gate` checks
+- **[rwa-compliance-flow](./examples/rwa-compliance-flow)** — full RWA compliance stack with allowlist, denylist, and jurisdiction checks
+- **[rwa-token](./examples/rwa-token)** — reference RWA token composing all three primitives (testnet deployment available)
+
 ## Quick start
 
 ```sh

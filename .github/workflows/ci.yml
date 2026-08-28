@@ -71,3 +71,42 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run cargo-deny
         uses: EmbarkStudios/cargo-deny-action@v2
+
+  examples-test:
+    name: test all examples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Enumerate and test examples
+        run: |
+          set -e
+          EXAMPLES_DIR="examples"
+          FAILED_CRATES=()
+          
+          echo "Testing all example crates..."
+          for dir in "$EXAMPLES_DIR"/*; do
+            if [ -d "$dir" ]; then
+              CRATE_NAME=$(basename "$dir")
+              if [ -f "$dir/Cargo.toml" ]; then
+                echo "Testing $CRATE_NAME..."
+                if ! cargo test -p "$CRATE_NAME" --verbose; then
+                  FAILED_CRATES+=("$CRATE_NAME")
+                fi
+              else
+                echo "ERROR: Directory $dir exists but has no Cargo.toml"
+                exit 1
+              fi
+            fi
+          done
+          
+          if [ ${#FAILED_CRATES[@]} -ne 0 ]; then
+            echo "ERROR: The following example crates failed tests:"
+            printf '  - %s\n' "${FAILED_CRATES[@]}"
+            exit 1
+          fi
+          
+          echo "All example crates passed tests."
