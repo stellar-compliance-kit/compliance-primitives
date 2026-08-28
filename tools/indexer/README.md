@@ -44,6 +44,56 @@ npm start
 
 ---
 
+## Docker
+
+### Build the image
+
+Run from the **repository root** (so Docker has access to the full build
+context) or from within `tools/indexer`:
+
+```sh
+# From repository root
+docker build -t compliance-indexer:latest tools/indexer
+
+# From tools/indexer
+docker build -t compliance-indexer:latest .
+```
+
+The image uses a two-stage build: the `builder` stage compiles TypeScript and
+prunes dev dependencies; the `runtime` stage copies only the compiled output
+and production `node_modules`, keeping the final image small.
+
+### Run the container
+
+Copy `.env.example` to `.env`, fill in your contract IDs and RPC URL, then:
+
+```sh
+docker run --rm \
+  --env-file tools/indexer/.env \
+  -v compliance-db:/data \
+  compliance-indexer:latest
+```
+
+`-v compliance-db:/data` mounts a named Docker volume so the SQLite database
+(`/data/compliance.db`) persists across container restarts. You can swap
+`/data` for any host path you prefer.
+
+To override individual variables without a full `.env` file:
+
+```sh
+docker run --rm \
+  -e RPC_URL=https://soroban-testnet.stellar.org \
+  -e NETWORK_PASSPHRASE="Test SDF Network ; September 2015" \
+  -e DENYLIST_CONTRACT_ID=C... \
+  -v compliance-db:/data \
+  compliance-indexer:latest
+```
+
+> **Note:** No secrets are baked into the image. All configuration is
+> supplied at runtime via environment variables.
+
+---
+
 ## Configuration (`.env`)
 
 | Variable | Default | Description |
