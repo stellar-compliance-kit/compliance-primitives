@@ -6,11 +6,16 @@
 <nav>
   <div class="wrap">
     <a class="brand" href="#top">compliance-primitives</a>
-    <div class="nav-links">
-      <a href="#contracts">Contracts</a>
-      <a href="#architecture">Architecture</a>
-      <a href="#quick-start">Quick start</a>
-      <a href="https://github.com/stellar-compliance-kit/compliance-primitives">GitHub</a>
+    <div class="nav-actions">
+      <div class="nav-links" id="site-nav">
+        <a href="#contracts">Contracts</a>
+        <a href="#architecture">Architecture</a>
+        <a href="#quick-start">Quick start</a>
+        <a href="interfaces.html">Interfaces</a>
+        <a href="https://github.com/stellar-compliance-kit/compliance-primitives">GitHub</a>
+      </div>
+      <button class="theme-toggle" type="button" aria-pressed="false" aria-label="Use dark mode">Dark mode</button>
+      <button class="menu-toggle" type="button" aria-expanded="false" aria-controls="site-nav">Menu</button>
     </div>
   </div>
 </nav>
@@ -167,3 +172,31 @@ stellar contract deploy \
     </div>
   </div>
 </footer>
+<script>
+  (() => {
+    const root = document.documentElement;
+    const themeToggle = document.querySelector('.theme-toggle');
+    const menuToggle = document.querySelector('.menu-toggle');
+    const nav = document.querySelector('#site-nav');
+    const savedTheme = localStorage.getItem('theme');
+    if (savedTheme === 'light' || savedTheme === 'dark') root.dataset.theme = savedTheme;
+    const updateTheme = () => {
+      const dark = root.dataset.theme === 'dark' || (!root.dataset.theme && matchMedia('(prefers-color-scheme: dark)').matches);
+      themeToggle.textContent = dark ? 'Light mode' : 'Dark mode';
+      themeToggle.setAttribute('aria-label', dark ? 'Use light mode' : 'Use dark mode');
+      themeToggle.setAttribute('aria-pressed', String(dark));
+    };
+    themeToggle.addEventListener('click', () => {
+      const dark = root.dataset.theme === 'dark' || (!root.dataset.theme && matchMedia('(prefers-color-scheme: dark)').matches);
+      root.dataset.theme = dark ? 'light' : 'dark';
+      localStorage.setItem('theme', root.dataset.theme);
+      updateTheme();
+    });
+    menuToggle.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      menuToggle.setAttribute('aria-expanded', String(open));
+    });
+    updateTheme();
+  })();
+</script>
+</body>

@@ -293,3 +293,131 @@ footer .foot-row {
   flex-wrap: wrap;
   gap: 8px;
 }
+
+/* Explicit user preference overrides the OS default. */
+:root[data-theme="light"] {
+  --bg: #ffffff;
+  --bg-raised: #f6f7f9;
+  --border: #e3e5e9;
+  --text: #1a1d23;
+  --text-dim: #5b616e;
+  --accent: #0060df;
+  --accent-bg: #eaf1fd;
+  --code-bg: #f6f7f9;
+  --code-text: #24292e;
+  --tag-bg: #eef1f5;
+}
+:root[data-theme="dark"] {
+  --bg: #0d1117;
+  --bg-raised: #151b23;
+  --border: #2a313c;
+  --text: #e6e8eb;
+  --text-dim: #9aa2ad;
+  --accent: #6ea8fe;
+  --accent-bg: #16233b;
+  --code-bg: #151b23;
+  --code-text: #d7dbe0;
+  --tag-bg: #1c2330;
+}
+.nav-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.theme-toggle,
+.menu-toggle {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-raised);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  padding: 7px 10px;
+}
+.theme-toggle:hover,
+.menu-toggle:hover {
+  border-color: var(--accent);
+}
+.menu-toggle {
+  display: none;
+}
+img, svg, video, iframe {
+  max-width: 100%;
+}
+@media (max-width: 640px) {
+  .wrap {
+    padding: 0 16px;
+  }
+  nav {
+    padding: 12px 0;
+  }
+  nav .wrap {
+    align-items: flex-start;
+  }
+  .nav-actions {
+    margin-left: auto;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  .menu-toggle {
+    display: inline-block;
+  }
+  .nav-links {
+    display: none;
+    flex-basis: 100%;
+    flex-direction: column;
+    gap: 0;
+    padding-top: 8px;
+    width: 100%;
+  }
+  .nav-links.is-open {
+    display: flex;
+  }
+  .nav-links a {
+    border-top: 1px solid var(--border);
+    padding: 10px 0;
+  }
+  header.hero {
+    padding: 42px 0 28px;
+  }
+  .lede {
+    font-size: 16px;
+  }
+  section {
+    padding: 30px 0;
+  }
+  .cards {
+    grid-template-columns: 1fr;
+  }
+  .card,
+  .flow,
+  pre.code {
+    padding: 16px;
+  }
+  .flow pre,
+  pre.code {
+    font-size: 12px;
+  }
+  .flow pre {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .foot-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+@media (max-width: 390px) {
+  .brand {
+    font-size: 14px;
+  }
+  .theme-toggle,
+  .menu-toggle {
+    font-size: 11px;
+    padding: 6px 8px;
+  }
+  h1 {
+    font-size: 28px;
+  }
+}
