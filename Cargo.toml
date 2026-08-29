@@ -8,6 +8,7 @@ members = [
     "contracts/circuit-breaker",
     "examples/denylist-gate-consumer",
     "examples/jurisdiction-denylist-consumer",
+    "examples/pausable-consumer",
 ]
 
 [workspace.package]
