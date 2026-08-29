@@ -74,6 +74,8 @@ jobs:
 
   examples-test:
     name: test all examples
+  docs-interfaces-diff:
+    name: docs/interfaces diff check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -110,3 +112,19 @@ jobs:
           fi
           
           echo "All example crates passed tests."
+      - name: Install stellar CLI
+        run: |
+          curl -s https://raw.githubusercontent.com/stellar/stellar-cli/master/install.sh | bash
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Regenerate interface docs
+        run: ./scripts/regenerate-docs.sh
+      - name: Check for differences
+        run: |
+          if git diff --exit-code docs/interfaces/ > /dev/null; then
+            echo "✓ docs/interfaces is up to date"
+          else
+            echo "✗ docs/interfaces is out of date. Run ./scripts/regenerate-docs.sh and commit the changes."
+            git diff docs/interfaces/
+            exit 1
+          fi
