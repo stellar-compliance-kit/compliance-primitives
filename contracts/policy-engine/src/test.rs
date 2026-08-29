@@ -71,16 +71,16 @@ fn test_all_checks_pass() {
 
     client.add_check(
         &admin,
-        &CheckKind::Denylist {
+        &CheckKind::Denylist(DenylistCheck {
             contract: deny_id.clone(),
-        },
+        }),
     );
     client.add_check(
         &admin,
-        &CheckKind::Jurisdiction {
+        &CheckKind::Jurisdiction(JurisdictionCheck {
             contract: juri_id.clone(),
             allowed_codes: vec![&env, String::from_str(&env, "US")],
-        },
+        }),
     );
 
     let result = client.evaluate(&from, &to);
@@ -116,16 +116,16 @@ fn test_one_check_fails_and_semantics() {
 
     client.add_check(
         &admin,
-        &CheckKind::Denylist {
+        &CheckKind::Denylist(DenylistCheck {
             contract: deny_id.clone(),
-        },
+        }),
     );
     client.add_check(
         &admin,
-        &CheckKind::Jurisdiction {
+        &CheckKind::Jurisdiction(JurisdictionCheck {
             contract: juri_id.clone(),
             allowed_codes: vec![&env, String::from_str(&env, "US")],
-        },
+        }),
     );
 
     let result = client.evaluate(&from, &to);
@@ -163,16 +163,16 @@ fn test_one_check_passes_or_semantics() {
 
     client.add_check(
         &admin,
-        &CheckKind::Denylist {
+        &CheckKind::Denylist(DenylistCheck {
             contract: deny_id.clone(),
-        },
+        }),
     );
     client.add_check(
         &admin,
-        &CheckKind::Jurisdiction {
+        &CheckKind::Jurisdiction(JurisdictionCheck {
             contract: juri_id.clone(),
             allowed_codes: vec![&env, String::from_str(&env, "US")],
-        },
+        }),
     );
 
     // With Any: the jurisdiction check passes for both → result is true.
@@ -197,9 +197,9 @@ fn test_add_and_remove_check() {
     // Add one check.
     client.add_check(
         &admin,
-        &CheckKind::Denylist {
+        &CheckKind::Denylist(DenylistCheck {
             contract: deny_id.clone(),
-        },
+        }),
     );
     assert_eq!(client.get_checks().len(), 1);
 
@@ -208,10 +208,10 @@ fn test_add_and_remove_check() {
     let juri_id = setup_jurisdiction(&env, &juri_issuer);
     client.add_check(
         &admin,
-        &CheckKind::Jurisdiction {
+        &CheckKind::Jurisdiction(JurisdictionCheck {
             contract: juri_id.clone(),
             allowed_codes: vec![&env, String::from_str(&env, "US")],
-        },
+        }),
     );
     assert_eq!(client.get_checks().len(), 2);
 

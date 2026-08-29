@@ -56,27 +56,64 @@ pub trait JurisdictionCheckInterface {
     fn is_permitted_jurisdiction(env: Env, address: Address, allowed_codes: Vec<String>) -> bool;
 }
 
+/// Describes the `allowlist-token` contract interface used for cross-contract
+/// calls. The generated `AllowlistCheckClient` is used in `evaluate` to call
+/// `is_allowed()` on a deployed allowlist-token instance.
+#[contractclient(name = "AllowlistCheckClient")]
+pub trait AllowlistCheckInterface {
+    fn is_allowed(env: Env, address: Address) -> bool;
+}
+
 // ---------------------------------------------------------------------------
 // Storage types
 // ---------------------------------------------------------------------------
+
+/// Parameters for a denylist-gate check.
+#[contracttype]
+#[derive(Clone)]
+pub struct DenylistCheck {
+    /// Address of the deployed `denylist-gate` contract to call.
+    pub contract: Address,
+}
+
+/// Parameters for a jurisdiction-flag check.
+#[contracttype]
+#[derive(Clone)]
+pub struct JurisdictionCheck {
+    /// Address of the deployed `jurisdiction-flag` contract to call.
+    pub contract: Address,
+    /// The set of jurisdiction codes that are permitted.
+    pub allowed_codes: Vec<String>,
+}
+
+/// Parameters for an allowlist-token check.
+#[contracttype]
+#[derive(Clone)]
+pub struct AllowlistCheck {
+    /// Address of the deployed `allowlist-token` contract to call.
+    pub contract: Address,
+}
 
 /// Describes a single compliance check the engine should perform.
 ///
 /// Each variant carries the address of the external contract that implements
 /// the check plus any parameters that check needs.
+///
+/// Note: `#[contracttype]` only supports tuple variants (not named struct
+/// variants). Each variant wraps a dedicated parameter struct.
 #[contracttype]
 #[derive(Clone)]
 pub enum CheckKind {
     /// Call `denylist-gate.check(address)`. The address must **not** be on
     /// the denylist for this check to pass.
-    Denylist { contract: Address },
+    Denylist(DenylistCheck),
     /// Call `jurisdiction-flag.is_permitted_jurisdiction(address,
     /// allowed_codes)`. The address must have a jurisdiction code in
     /// `allowed_codes` for this check to pass.
-    Jurisdiction {
-        contract: Address,
-        allowed_codes: Vec<String>,
-    },
+    Jurisdiction(JurisdictionCheck),
+    /// Call `allowlist-token.is_allowed(address)`. The address must be
+    /// present on the allowlist for this check to pass.
+    Allowlist(AllowlistCheck),
 }
 
 /// How the engine combines the results of multiple checks.
@@ -289,16 +326,17 @@ impl PolicyEngine {
 
     fn run_check(env: &Env, check: &CheckKind, address: &Address) -> bool {
         match check {
-            CheckKind::Denylist { contract } => {
-                let client = DenylistCheckClient::new(env, contract);
+            CheckKind::Denylist(params) => {
+                let client = DenylistCheckClient::new(env, &params.contract);
                 client.check(address)
             }
-            CheckKind::Jurisdiction {
-                contract,
-                allowed_codes,
-            } => {
-                let client = JurisdictionCheckClient::new(env, contract);
-                client.is_permitted_jurisdiction(address, allowed_codes)
+            CheckKind::Jurisdiction(params) => {
+                let client = JurisdictionCheckClient::new(env, &params.contract);
+                client.is_permitted_jurisdiction(address, &params.allowed_codes)
+            }
+            CheckKind::Allowlist(params) => {
+                let client = AllowlistCheckClient::new(env, &params.contract);
+                client.is_allowed(address)
             }
         }
     }
@@ -319,3 +357,6 @@ impl PolicyEngine {
 
 #[cfg(test)]
 mod test;
+
+#[cfg(test)]
+mod integration_test;
