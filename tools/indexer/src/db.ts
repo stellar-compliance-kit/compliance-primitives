@@ -14,11 +14,15 @@
  *   timestamp       INTEGER            — Unix seconds (ledger close time)
  *   contract_id     TEXT NOT NULL
  *   event_type      TEXT NOT NULL      — AllowAdd | AllowRemove | Blocked |
- *                                        DenyAdd | DenyRemove | JurisdictionSet
+ *                                        DenyAdd | DenyRemove | JurisdictionSet |
+ *                                        ComplianceEvent
  *   address         TEXT               — primary subject address
  *   address_to      TEXT               — secondary address (Blocked only)
  *   amount          TEXT               — i128 as decimal string (Blocked only)
  *   jurisdiction    TEXT               — ISO code (JurisdictionSet only)
+ *   kind            TEXT               — audit-log event kind (ComplianceEvent only)
+ *   source          TEXT               — audit-log source address (ComplianceEvent only)
+ *   detail          TEXT               — audit-log detail string (ComplianceEvent only)
  *   raw_topics      TEXT NOT NULL      — JSON array of base64-XDR topic strings
  *   raw_data        TEXT NOT NULL      — base64-XDR data value
  *
@@ -56,6 +60,12 @@ export interface RawEvent {
   addressTo: string | null;
   amount: string | null;
   jurisdiction: string | null;
+  /** Populated for ComplianceEvent: the kind symbol value (e.g. "deny_add") */
+  kind: string | null;
+  /** Populated for ComplianceEvent: the source address that called record() */
+  source: string | null;
+  /** Populated for ComplianceEvent: the free-form detail string */
+  detail: string | null;
   rawTopics: string;
   rawData: string;
 }
@@ -102,6 +112,9 @@ export class ComplianceDb {
         address_to      TEXT,
         amount          TEXT,
         jurisdiction    TEXT,
+        kind            TEXT,
+        source          TEXT,
+        detail          TEXT,
         raw_topics      TEXT    NOT NULL,
         raw_data        TEXT    NOT NULL
       );
@@ -133,6 +146,24 @@ export class ComplianceDb {
         code        TEXT NOT NULL,
         PRIMARY KEY (contract_id, address)
       );
+
+      CREATE TABLE IF NOT EXISTS audit_log (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        contract_id TEXT    NOT NULL,
+        ledger      INTEGER NOT NULL,
+        timestamp   INTEGER,
+        kind        TEXT    NOT NULL,
+        subject     TEXT    NOT NULL,
+        source      TEXT    NOT NULL,
+        detail      TEXT    NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_audit_log_contract
+        ON audit_log (contract_id);
+      CREATE INDEX IF NOT EXISTS idx_audit_log_subject
+        ON audit_log (subject);
+      CREATE INDEX IF NOT EXISTS idx_audit_log_kind
+        ON audit_log (kind);
 
       CREATE TABLE IF NOT EXISTS indexer_state (
         key   TEXT PRIMARY KEY,
@@ -168,8 +199,10 @@ export class ComplianceDb {
     this.db.run(
       `INSERT INTO events
          (ledger_sequence, timestamp, contract_id, event_type,
-          address, address_to, amount, jurisdiction, raw_topics, raw_data)
-       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+          address, address_to, amount, jurisdiction,
+          kind, source, detail,
+          raw_topics, raw_data)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         e.ledgerSequence,
         e.timestamp,
@@ -179,6 +212,9 @@ export class ComplianceDb {
         e.addressTo,
         e.amount,
         e.jurisdiction,
+        e.kind,
+        e.source,
+        e.detail,
         e.rawTopics,
         e.rawData,
       ]
@@ -228,7 +264,29 @@ export class ComplianceDb {
           );
         }
         break;
-      // Blocked: recorded in events log only, no state change
+      case "Blocked":
+        // Recorded in events log only; no materialised-state change.
+        break;
+      case "ComplianceEvent":
+        // Append a row to the audit_log materialised table so callers can
+        // query the full audit trail without scanning the raw events table.
+        if (e.kind && e.address && e.source != null) {
+          this.db.run(
+            `INSERT INTO audit_log
+               (contract_id, ledger, timestamp, kind, subject, source, detail)
+             VALUES (?,?,?,?,?,?,?)`,
+            [
+              e.contractId,
+              e.ledgerSequence,
+              e.timestamp,
+              e.kind,
+              e.address,   // subject
+              e.source,
+              e.detail ?? "",
+            ]
+          );
+        }
+        break;
     }
   }
 
