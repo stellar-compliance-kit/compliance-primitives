@@ -7,6 +7,7 @@ use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, 
 enum DataKey {
     Admin,
     Frozen,
+    PendingAdmin,
 }
 
 #[contracterror]
@@ -16,6 +17,8 @@ pub enum Error {
     NotInitialized = 1,
     AlreadyInitialized = 2,
     NotAuthorized = 3,
+    NoPendingAdmin = 4,
+    PendingAdminMismatch = 5,
 }
 
 #[contract]
@@ -47,6 +50,32 @@ impl CircuitBreaker {
 
     pub fn is_frozen(env: Env) -> bool {
         env.storage().instance().get(&DataKey::Frozen).unwrap_or(false)
+    }
+
+    /// Propose a new admin. The current admin remains fully in control
+    /// until the proposed admin calls `accept_admin`; this avoids a
+    /// single-typo lockout from a direct admin overwrite.
+    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
+        Ok(())
+    }
+
+    /// Accept a pending admin transfer. Must be called by the proposed
+    /// admin itself.
+    pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), Error> {
+        new_admin.require_auth();
+        let pending_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .ok_or(Error::NoPendingAdmin)?;
+        if pending_admin != new_admin {
+            return Err(Error::PendingAdminMismatch);
+        }
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        Ok(())
     }
 
     fn require_admin(env: &Env, admin: &Address) -> Result<(), Error> {

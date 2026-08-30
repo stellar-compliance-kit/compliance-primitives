@@ -87,3 +87,39 @@ fn test_double_unfreeze_is_idempotent() {
     client.unfreeze(&admin);
     assert!(!client.is_frozen());
 }
+
+#[test]
+fn test_propose_then_accept_admin_transfers_control() {
+    let env = Env::default();
+    let (admin, client) = setup(&env);
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+    client.accept_admin(&new_admin);
+
+    // Old admin no longer has control.
+    let freeze_result = client.try_freeze(&admin);
+    assert_eq!(freeze_result, Err(Ok(Error::NotAuthorized)));
+
+    // New admin does.
+    client.freeze(&new_admin);
+    assert!(client.is_frozen());
+}
+
+#[test]
+fn test_propose_never_accepted_old_admin_retains_control() {
+    let env = Env::default();
+    let (admin, client) = setup(&env);
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+    // `new_admin` never calls accept_admin.
+
+    // Old admin still has control.
+    client.freeze(&admin);
+    assert!(client.is_frozen());
+
+    // The proposed admin has no control yet.
+    let unfreeze_result = client.try_unfreeze(&new_admin);
+    assert_eq!(unfreeze_result, Err(Ok(Error::NotAuthorized)));
+}
