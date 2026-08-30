@@ -546,6 +546,72 @@ fn test_check_all_no_checks_registered() {
 }
 
 // ---------------------------------------------------------------------------
+// batch_check (#216)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_batch_check_matches_individual_check_address() {
+    let env = Env::default();
+    let (gate_admin, gate_id, flag_issuer, flag_id, _, _, client) = setup_all(&env);
+
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    let carol = Address::generate(&env);
+
+    // alice: both pass
+    set_jurisdiction(&env, &flag_id, &flag_issuer, &alice, "US");
+    // bob: denylist fail, jurisdiction pass
+    set_jurisdiction(&env, &flag_id, &flag_issuer, &bob, "US");
+    deny(&env, &gate_id, &gate_admin, &bob);
+    // carol: denylist pass, no jurisdiction set -> jurisdiction fail
+
+    let addresses = vec![&env, alice.clone(), bob.clone(), carol.clone()];
+    let batch_results = client.batch_check(&addresses, &us_vec(&env));
+
+    assert_eq!(batch_results.len(), 3);
+    for (i, addr) in [&alice, &bob, &carol].into_iter().enumerate() {
+        let (expected, _) = client.check_address(addr, &us_vec(&env));
+        assert_eq!(batch_results.get(i as u32).unwrap(), expected);
+    }
+}
+
+#[test]
+fn test_batch_check_empty_list_error() {
+    let env = Env::default();
+    let (_, _, _, _, _, _, client) = setup_all(&env);
+    let result = client.try_batch_check(&vec![&env], &us_vec(&env));
+    assert_eq!(result, Err(Ok(Error::EmptyAddressList)));
+}
+
+#[test]
+fn test_batch_check_no_checks_registered() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let id = env.register(ComplianceAggregator, ());
+    let client = ComplianceAggregatorClient::new(&env, &id);
+    client.initialize(&admin, &None, &None);
+
+    let alice = Address::generate(&env);
+    let result = client.try_batch_check(&vec![&env, alice], &vec![&env]);
+    assert_eq!(result, Err(Ok(Error::NoChecksRegistered)));
+}
+
+#[test]
+fn test_batch_check_rejects_oversized_batch() {
+    let env = Env::default();
+    let (_, _, _, _, _, _, client) = setup_all(&env);
+
+    let mut addresses: Vec<Address> = Vec::new(&env);
+    for _ in 0..(ComplianceAggregator::MAX_BATCH_SIZE + 1) {
+        addresses.push_back(Address::generate(&env));
+    }
+
+    let result = client.try_batch_check(&addresses, &us_vec(&env));
+    assert_eq!(result, Err(Ok(Error::BatchTooLarge)));
+}
+
+// ---------------------------------------------------------------------------
 // Benchmark: individual calls vs. aggregated call
 //
 // Soroban's `cost_estimate().budget()` gives CPU-instruction and memory-byte
