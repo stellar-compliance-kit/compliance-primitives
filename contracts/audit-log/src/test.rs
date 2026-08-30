@@ -198,6 +198,61 @@ fn test_get_entry_out_of_range_returns_none() {
 }
 
 #[test]
+fn test_list_entries_paginates_across_multi_page_set() {
+    let env = Env::default();
+    let (_admin, _contract_id, client) = setup(&env);
+
+    let source = Address::generate(&env);
+    let subject = Address::generate(&env);
+    let kind = Symbol::new(&env, "deny_add");
+
+    // Record 5 entries.
+    for i in 0..5u32 {
+        let detail = soroban_sdk::String::from_str(
+            &env,
+            match i {
+                0 => "entry-0",
+                1 => "entry-1",
+                2 => "entry-2",
+                3 => "entry-3",
+                _ => "entry-4",
+            },
+        );
+        client.record(&source, &kind, &subject, &detail);
+    }
+    assert_eq!(client.entry_count(), 5u64);
+
+    // Page through with a page size of 2.
+    let page1 = client.list_entries(&0u64, &2u32);
+    assert_eq!(page1.len(), 2);
+    assert_eq!(page1.get(0).unwrap().detail, soroban_sdk::String::from_str(&env, "entry-0"));
+    assert_eq!(page1.get(1).unwrap().detail, soroban_sdk::String::from_str(&env, "entry-1"));
+
+    let page2 = client.list_entries(&2u64, &2u32);
+    assert_eq!(page2.len(), 2);
+    assert_eq!(page2.get(0).unwrap().detail, soroban_sdk::String::from_str(&env, "entry-2"));
+    assert_eq!(page2.get(1).unwrap().detail, soroban_sdk::String::from_str(&env, "entry-3"));
+
+    // Final page is short because only one entry remains.
+    let page3 = client.list_entries(&4u64, &2u32);
+    assert_eq!(page3.len(), 1);
+    assert_eq!(page3.get(0).unwrap().detail, soroban_sdk::String::from_str(&env, "entry-4"));
+
+    // Starting past the end returns an empty page.
+    let page4 = client.list_entries(&5u64, &2u32);
+    assert_eq!(page4.len(), 0);
+}
+
+#[test]
+fn test_list_entries_rejects_page_size_over_max() {
+    let env = Env::default();
+    let (_admin, _contract_id, client) = setup(&env);
+
+    let result = client.try_list_entries(&0u64, &(MAX_PAGE_SIZE + 1));
+    assert_eq!(result, Err(Ok(Error::PageTooLarge)));
+}
+
+#[test]
 fn test_double_initialize_fails() {
     let env = Env::default();
     let (admin, _contract_id, client) = setup(&env);
