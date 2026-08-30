@@ -219,3 +219,63 @@ fn test_add_and_remove_check() {
     client.remove_check(&admin, &0);
     assert_eq!(client.get_checks().len(), 1);
 }
+
+/// `get_policy` returns a `PolicyNode` whose `op` and `checks` fields exactly
+/// match what was configured via `initialize` / `add_check`.
+#[test]
+fn test_get_policy_matches_configuration() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    // Set up two external contracts to use as checks.
+    let deny_admin = Address::generate(&env);
+    let juri_issuer = Address::generate(&env);
+    let deny_id = setup_denylist(&env, &deny_admin);
+    let juri_id = setup_jurisdiction(&env, &juri_issuer);
+
+    // Initialise with `Any` semantics and add two checks.
+    let (admin, _engine_id, client) = setup_engine_any(&env);
+
+    let allowed_codes = vec![&env, String::from_str(&env, "US"), String::from_str(&env, "GB")];
+
+    client.add_check(
+        &admin,
+        &CheckKind::Denylist {
+            contract: deny_id.clone(),
+        },
+    );
+    client.add_check(
+        &admin,
+        &CheckKind::Jurisdiction {
+            contract: juri_id.clone(),
+            allowed_codes: allowed_codes.clone(),
+        },
+    );
+
+    // Fetch the full policy tree.
+    let policy = client.get_policy();
+
+    // The combine operator must match what was passed to `initialize`.
+    assert_eq!(policy.op, CombineOp::Any);
+
+    // There must be exactly two checks, in insertion order.
+    assert_eq!(policy.checks.len(), 2);
+
+    // First check must be the denylist check with the correct contract address.
+    match policy.checks.get(0).unwrap() {
+        CheckKind::Denylist { contract } => assert_eq!(contract, deny_id),
+        _ => panic!("expected Denylist check at index 0"),
+    }
+
+    // Second check must be the jurisdiction check with correct contract and codes.
+    match policy.checks.get(1).unwrap() {
+        CheckKind::Jurisdiction {
+            contract,
+            allowed_codes: codes,
+        } => {
+            assert_eq!(contract, juri_id);
+            assert_eq!(codes, allowed_codes);
+        }
+        _ => panic!("expected Jurisdiction check at index 1"),
+    }
+}
