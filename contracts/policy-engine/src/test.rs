@@ -3,6 +3,7 @@ use denylist_gate::{DenylistGate, DenylistGateClient};
 use jurisdiction_flag::{JurisdictionFlag, JurisdictionFlagClient};
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{vec, Env, String};
+use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -285,4 +286,86 @@ fn test_upgrade_requires_admin() {
     let new_wasm_hash = env.deployer().upload_contract_wasm(self_wasm::WASM);
     let result = client.try_upgrade(&attacker, &new_wasm_hash);
     assert_eq!(result, Err(Ok(Error::NotAuthorized)));
+}
+
+// ---------------------------------------------------------------------------
+// Resource-fee (budget) regression check
+// ---------------------------------------------------------------------------
+
+fn baseline_path_for_manifest_dir(manifest_dir: PathBuf) -> PathBuf {
+    manifest_dir.join("..").join("..").join("budget-baselines.toml")
+}
+
+fn read_baseline(path: &Path, section: &str) -> (u64, u64) {
+    let contents = std::fs::read_to_string(path).unwrap();
+    let section_header = format!("[{section}]");
+    let mut in_section = false;
+    let mut cpu = None;
+    let mut memory = None;
+
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_section = trimmed == section_header;
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        if let Some(value) = trimmed.strip_prefix("cpu = ") {
+            cpu = Some(value.parse::<u64>().unwrap());
+        } else if let Some(value) = trimmed.strip_prefix("memory = ") {
+            memory = Some(value.parse::<u64>().unwrap());
+        }
+    }
+
+    let cpu = cpu.expect("missing cpu baseline");
+    let memory = memory.expect("missing memory baseline");
+    (cpu, memory)
+}
+
+fn assert_budget_within_threshold(measured: (u64, u64), baseline: (u64, u64), label: &str) {
+    let (measured_cpu, measured_memory) = measured;
+    let (baseline_cpu, baseline_memory) = baseline;
+    let cpu_limit = (baseline_cpu as f64 * 1.10).ceil() as u64;
+    let memory_limit = (baseline_memory as f64 * 1.10).ceil() as u64;
+
+    assert!(
+        measured_cpu <= cpu_limit,
+        "{label} CPU regression: measured {measured_cpu}, baseline {baseline_cpu}, limit {cpu_limit}"
+    );
+    assert!(
+        measured_memory <= memory_limit,
+        "{label} memory regression: measured {measured_memory}, baseline {baseline_memory}, limit {memory_limit}"
+    );
+}
+
+/// Benchmarks policy-engine's hottest entrypoint, `evaluate`, against the
+/// recorded baseline in `budget-baselines.toml`. Fails (and so fails CI via
+/// the `budget-regression` job, which runs `cargo test ... budget_regression`)
+/// if measured CPU or memory cost regresses more than 10% past baseline.
+#[test]
+fn test_budget_regression_policy_engine_evaluate() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (admin, _id, client) = setup_engine_all(&env);
+    let deny_admin = Address::generate(&env);
+    let deny_id = setup_denylist(&env, &deny_admin);
+    client.add_check(&admin, &CheckKind::Denylist { contract: deny_id });
+
+    let from = Address::generate(&env);
+    let to = Address::generate(&env);
+
+    let mut budget = env.cost_estimate().budget();
+    budget.reset_default();
+    let passed = client.evaluate(&from, &to);
+    assert!(passed);
+
+    let measured = (budget.cpu_instruction_cost(), budget.memory_bytes_cost());
+    let baseline_path = baseline_path_for_manifest_dir(PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").unwrap(),
+    ));
+    let baseline = read_baseline(&baseline_path, "policy-engine.evaluate");
+    assert_budget_within_threshold(measured, baseline, "policy-engine evaluate");
 }
