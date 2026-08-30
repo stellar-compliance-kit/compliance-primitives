@@ -25,6 +25,7 @@
 extern crate std;
 
 use super::*;
+use circuit_breaker::{CircuitBreaker, CircuitBreakerClient as CbClient};
 use denylist_gate::{DenylistGate, DenylistGateClient};
 use jurisdiction_flag::{JurisdictionFlag, JurisdictionFlagClient};
 use soroban_sdk::testutils::Address as _;
@@ -64,7 +65,7 @@ fn setup_all(
     let agg_admin = Address::generate(env);
     let agg_id = env.register(ComplianceAggregator, ());
     let agg_client = ComplianceAggregatorClient::new(env, &agg_id);
-    agg_client.initialize(&agg_admin, &Some(gate_id.clone()), &Some(flag_id.clone()));
+    agg_client.initialize(&agg_admin, &Some(gate_id.clone()), &Some(flag_id.clone()), &None);
 
     (
         gate_admin, gate_id, flag_issuer, flag_id, agg_admin, agg_id, agg_client,
@@ -105,7 +106,7 @@ fn test_initialize_without_checks() {
     let admin = Address::generate(&env);
     let id = env.register(ComplianceAggregator, ());
     let client = ComplianceAggregatorClient::new(&env, &id);
-    client.initialize(&admin, &None, &None);
+    client.initialize(&admin, &None, &None, &None);
     assert_eq!(client.denylist_gate(), None);
     assert_eq!(client.jurisdiction_flag(), None);
 }
@@ -114,7 +115,7 @@ fn test_initialize_without_checks() {
 fn test_double_initialize_fails() {
     let env = Env::default();
     let (_, _, _, _, admin, _, client) = setup_all(&env);
-    let result = client.try_initialize(&admin, &None, &None);
+    let result = client.try_initialize(&admin, &None, &None, &None);
     assert_eq!(result, Err(Ok(Error::AlreadyInitialized)));
 }
 
@@ -176,7 +177,7 @@ fn test_check_address_denylist_only_pass() {
     let agg_admin = Address::generate(&env);
     let agg_id = env.register(ComplianceAggregator, ());
     let client = ComplianceAggregatorClient::new(&env, &agg_id);
-    client.initialize(&agg_admin, &Some(gate_id.clone()), &None);
+    client.initialize(&agg_admin, &Some(gate_id.clone()), &None, &None);
 
     let alice = Address::generate(&env);
     let (all_passed, checks) = client.check_address(&alice, &vec![&env]);
@@ -204,7 +205,7 @@ fn test_check_address_denylist_only_fail() {
     let agg_admin = Address::generate(&env);
     let agg_id = env.register(ComplianceAggregator, ());
     let client = ComplianceAggregatorClient::new(&env, &agg_id);
-    client.initialize(&agg_admin, &Some(gate_id.clone()), &None);
+    client.initialize(&agg_admin, &Some(gate_id.clone()), &None, &None);
 
     let alice = Address::generate(&env);
     gate_client.add_to_denylist(&gate_admin, &alice);
@@ -237,7 +238,7 @@ fn test_check_address_jurisdiction_only_pass() {
     let agg_admin = Address::generate(&env);
     let agg_id = env.register(ComplianceAggregator, ());
     let client = ComplianceAggregatorClient::new(&env, &agg_id);
-    client.initialize(&agg_admin, &None, &Some(flag_id.clone()));
+    client.initialize(&agg_admin, &None, &Some(flag_id.clone()), &None);
 
     let alice = Address::generate(&env);
     flag_client.set_jurisdiction(&flag_issuer, &alice, &String::from_str(&env, "US"));
@@ -266,7 +267,7 @@ fn test_check_address_jurisdiction_only_fail_wrong_code() {
     let agg_admin = Address::generate(&env);
     let agg_id = env.register(ComplianceAggregator, ());
     let client = ComplianceAggregatorClient::new(&env, &agg_id);
-    client.initialize(&agg_admin, &None, &Some(flag_id.clone()));
+    client.initialize(&agg_admin, &None, &Some(flag_id.clone()), &None);
 
     let alice = Address::generate(&env);
     // Alice is in RU, but only US is permitted
@@ -360,7 +361,7 @@ fn test_check_address_no_checks_registered() {
     let admin = Address::generate(&env);
     let id = env.register(ComplianceAggregator, ());
     let client = ComplianceAggregatorClient::new(&env, &id);
-    client.initialize(&admin, &None, &None);
+    client.initialize(&admin, &None, &None, &None);
 
     let alice = Address::generate(&env);
     let result = client.try_check_address(&alice, &vec![&env]);
@@ -441,7 +442,7 @@ fn test_check_all_no_checks_registered() {
     let admin = Address::generate(&env);
     let id = env.register(ComplianceAggregator, ());
     let client = ComplianceAggregatorClient::new(&env, &id);
-    client.initialize(&admin, &None, &None);
+    client.initialize(&admin, &None, &None, &None);
 
     let alice = Address::generate(&env);
     let result = client.try_check_all(&vec![&env, alice], &vec![&env]);
@@ -494,7 +495,7 @@ fn bench_individual_vs_aggregated() {
     let agg_admin = Address::generate(&env);
     let agg_id = env.register(ComplianceAggregator, ());
     let agg_client = ComplianceAggregatorClient::new(&env, &agg_id);
-    agg_client.initialize(&agg_admin, &Some(gate_id.clone()), &Some(flag_id.clone()));
+    agg_client.initialize(&agg_admin, &Some(gate_id.clone()), &Some(flag_id.clone()), &None);
 
     let alice = Address::generate(&env);
     flag_client.set_jurisdiction(&flag_issuer, &alice, &String::from_str(&env, "US"));
@@ -596,4 +597,49 @@ fn bench_batch_vs_individual_loop() {
         batch_cpu <= individual_cpu * 4,
         "Batch path CPU ({batch_cpu}) exceeds 4× the individual loop ({individual_cpu})"
     );
+}
+
+// ---------------------------------------------------------------------------
+// circuit-breaker wiring
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_circuit_breaker_freeze_short_circuits_check_address() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let gate_admin = Address::generate(&env);
+    let gate_id = env.register(DenylistGate, ());
+    DenylistGateClient::new(&env, &gate_id).initialize(&gate_admin);
+
+    let breaker_admin = Address::generate(&env);
+    let breaker_id = env.register(CircuitBreaker, ());
+    let breaker_client = CbClient::new(&env, &breaker_id);
+    breaker_client.initialize(&breaker_admin);
+
+    let agg_admin = Address::generate(&env);
+    let agg_id = env.register(ComplianceAggregator, ());
+    let client = ComplianceAggregatorClient::new(&env, &agg_id);
+    client.initialize(
+        &agg_admin,
+        &Some(gate_id.clone()),
+        &None,
+        &Some(breaker_id.clone()),
+    );
+
+    let alice = Address::generate(&env);
+
+    // Before freezing, the check passes normally.
+    let (all_passed, checks) = client.check_address(&alice, &vec![&env]);
+    assert!(all_passed);
+    assert_eq!(checks.len(), 1);
+
+    // Freeze mid-flow.
+    breaker_client.freeze(&breaker_admin);
+
+    // Now the same previously-passing check is denied without even
+    // consulting the denylist-gate.
+    let (all_passed, checks) = client.check_address(&alice, &vec![&env]);
+    assert!(!all_passed);
+    assert!(checks.is_empty());
 }

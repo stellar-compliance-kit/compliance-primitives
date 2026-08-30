@@ -1,4 +1,5 @@
 use super::*;
+use circuit_breaker::{CircuitBreaker, CircuitBreakerClient as CbClient};
 use denylist_gate::{DenylistGate, DenylistGateClient};
 use jurisdiction_flag::{JurisdictionFlag, JurisdictionFlagClient};
 use soroban_sdk::testutils::Address as _;
@@ -28,7 +29,7 @@ fn setup_engine_all(env: &Env) -> (Address, Address, PolicyEngineClient<'_>) {
     let admin = Address::generate(env);
     let id = env.register(PolicyEngine, ());
     let client = PolicyEngineClient::new(env, &id);
-    client.initialize(&admin, &CombineOp::All);
+    client.initialize(&admin, &CombineOp::All, &None);
     (admin, id, client)
 }
 
@@ -37,7 +38,7 @@ fn setup_engine_any(env: &Env) -> (Address, Address, PolicyEngineClient<'_>) {
     let admin = Address::generate(env);
     let id = env.register(PolicyEngine, ());
     let client = PolicyEngineClient::new(env, &id);
-    client.initialize(&admin, &CombineOp::Any);
+    client.initialize(&admin, &CombineOp::Any, &None);
     (admin, id, client)
 }
 
@@ -218,4 +219,41 @@ fn test_add_and_remove_check() {
     // Remove the first check (index 0); list should shrink to 1.
     client.remove_check(&admin, &0);
     assert_eq!(client.get_checks().len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// circuit-breaker wiring
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_circuit_breaker_freeze_short_circuits_evaluate() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let deny_admin = Address::generate(&env);
+    let deny_id = setup_denylist(&env, &deny_admin);
+
+    let breaker_admin = Address::generate(&env);
+    let breaker_id = env.register(CircuitBreaker, ());
+    let breaker_client = CbClient::new(&env, &breaker_id);
+    breaker_client.initialize(&breaker_admin);
+
+    let admin = Address::generate(&env);
+    let id = env.register(PolicyEngine, ());
+    let client = PolicyEngineClient::new(&env, &id);
+    client.initialize(&admin, &CombineOp::All, &Some(breaker_id.clone()));
+    client.add_check(&admin, &CheckKind::Denylist { contract: deny_id });
+
+    let from = Address::generate(&env);
+    let to = Address::generate(&env);
+
+    // Before freezing, evaluation passes (neither address is denylisted).
+    assert!(client.evaluate(&from, &to));
+
+    // Freeze mid-flow.
+    breaker_client.freeze(&breaker_admin);
+
+    // Now the same previously-passing evaluation is denied without
+    // consulting the underlying denylist-gate check.
+    assert!(!client.evaluate(&from, &to));
 }
