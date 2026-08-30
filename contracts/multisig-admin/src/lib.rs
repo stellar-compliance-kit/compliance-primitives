@@ -213,11 +213,22 @@ impl MultisigAdmin {
     // Read-only accessors
     // -----------------------------------------------------------------------
 
-    pub fn get_signers(env: Env) -> Vec<Address> {
-        env.storage()
+    /// Returns the currently configured signer set together with the
+    /// signing threshold, as `(signers, threshold)`. Used by off-chain
+    /// tooling (e.g. the indexer) and by other contracts deciding whether to
+    /// trust this contract as an admin.
+    pub fn get_signers(env: Env) -> (Vec<Address>, u32) {
+        let signers: Vec<Address> = env
+            .storage()
             .instance()
             .get(&DataKey::Signers)
-            .unwrap_or_else(|| Vec::new(&env))
+            .unwrap_or_else(|| Vec::new(&env));
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Threshold)
+            .unwrap_or(0);
+        (signers, threshold)
     }
 
     pub fn get_threshold(env: Env) -> u32 {

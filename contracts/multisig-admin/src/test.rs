@@ -43,12 +43,26 @@ fn test_initialize_stores_signers_and_threshold() {
     let (signers, _id, client) = setup_multisig(&env, 3, 2);
 
     assert_eq!(client.get_threshold(), 2u32);
-    let stored = client.get_signers();
+    let (stored, stored_threshold) = client.get_signers();
     assert_eq!(stored.len(), 3);
+    assert_eq!(stored_threshold, 2u32);
     // All original signers should be present.
     for i in 0..signers.len() {
         assert_eq!(stored.get(i), signers.get(i));
     }
+}
+
+#[test]
+fn test_get_signers_matches_initialization() {
+    let env = Env::default();
+    let (signers, _id, client) = setup_multisig(&env, 4, 3);
+
+    let (stored, threshold) = client.get_signers();
+    assert_eq!(stored.len(), signers.len());
+    for i in 0..signers.len() {
+        assert_eq!(stored.get(i), signers.get(i));
+    }
+    assert_eq!(threshold, 3u32);
 }
 
 #[test]
@@ -92,7 +106,7 @@ fn test_add_signer_increases_count() {
     let (_signers, _id, client) = setup_multisig(&env, 2, 1);
     let new_signer = Address::generate(&env);
     client.add_signer(&new_signer);
-    assert_eq!(client.get_signers().len(), 3);
+    assert_eq!(client.get_signers().0.len(), 3);
 }
 
 #[test]
@@ -110,7 +124,7 @@ fn test_remove_signer_decreases_count() {
     let (signers, _id, client) = setup_multisig(&env, 3, 1);
     let to_remove = signers.get(0).unwrap();
     client.remove_signer(&to_remove);
-    assert_eq!(client.get_signers().len(), 2);
+    assert_eq!(client.get_signers().0.len(), 2);
 }
 
 #[test]
@@ -214,7 +228,7 @@ fn test_signer_update_requires_multisig_auth() {
     // satisfied by the mock), demonstrating the round-trip plumbing works.
     let new_signer = Address::generate(&env);
     client.add_signer(&new_signer);
-    assert_eq!(client.get_signers().len(), 3);
+    assert_eq!(client.get_signers().0.len(), 3);
     // A separate rejection test for the threshold path is
     // test_threshold_not_met_error_value above.
 }
