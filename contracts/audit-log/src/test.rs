@@ -223,3 +223,83 @@ fn test_get_admin_fails_before_initialize() {
     assert_eq!(result, Err(Ok(Error::NotInitialized)));
 }
 
+// ---------------------------------------------------------------------------
+// Duplicate-entry idempotency / ordering
+// ---------------------------------------------------------------------------
+
+/// Logging two distinct events in the same call sequence (same ledger)
+/// must produce two entries, retrievable in append order.
+#[test]
+fn test_two_distinct_events_same_ledger_preserve_order() {
+    let env = Env::default();
+    let (_admin, _contract_id, client) = setup(&env);
+
+    let source = Address::generate(&env);
+    let subject = Address::generate(&env);
+    let kind_a = Symbol::new(&env, "deny_add");
+    let kind_b = Symbol::new(&env, "deny_remove");
+    let detail_a = soroban_sdk::String::from_str(&env, "first event");
+    let detail_b = soroban_sdk::String::from_str(&env, "second event");
+
+    client.record(&source, &kind_a, &subject, &detail_a);
+    client.record(&source, &kind_b, &subject, &detail_b);
+
+    assert_eq!(client.entry_count(), 2u64);
+
+    let entry0 = client.get_entry(&0u64).expect("entry 0 must exist");
+    let entry1 = client.get_entry(&1u64).expect("entry 1 must exist");
+
+    assert_eq!(entry0.kind, kind_a);
+    assert_eq!(entry0.detail, detail_a);
+    assert_eq!(entry1.kind, kind_b);
+    assert_eq!(entry1.detail, detail_b);
+}
+
+/// Logging the same (source, event) pair twice — whether in the same call
+/// sequence or across separate ledgers — must produce two distinct entries
+/// rather than silently overwriting the first. The append-only counter
+/// keys each entry by its own index, so duplicates are never collapsed.
+#[test]
+fn test_duplicate_source_event_pair_produces_two_entries() {
+    let env = Env::default();
+    let (_admin, _contract_id, client) = setup(&env);
+
+    let source = Address::generate(&env);
+    let subject = Address::generate(&env);
+    let kind = Symbol::new(&env, "deny_add");
+    let detail = soroban_sdk::String::from_str(&env, "sanction hit");
+
+    // Log the identical (source, kind, subject, detail) tuple twice within
+    // the same ledger.
+    client.record(&source, &kind, &subject, &detail);
+    client.record(&source, &kind, &subject, &detail);
+
+    assert_eq!(
+        client.entry_count(),
+        2u64,
+        "duplicate events must not be collapsed into a single entry"
+    );
+
+    let entry0 = client.get_entry(&0u64).expect("entry 0 must exist");
+    let entry1 = client.get_entry(&1u64).expect("entry 1 must exist");
+
+    // Both entries carry identical content but live at distinct, ordered
+    // indices — proving the log appends rather than overwrites.
+    assert_eq!(entry0.source, entry1.source);
+    assert_eq!(entry0.kind, entry1.kind);
+    assert_eq!(entry0.subject, entry1.subject);
+    assert_eq!(entry0.detail, entry1.detail);
+
+    // Now advance to a new ledger and log the same pair again — it must
+    // still append rather than overwrite entry 0 or entry 1.
+    env.ledger().with_mut(|l| l.sequence_number += 1);
+    client.record(&source, &kind, &subject, &detail);
+
+    assert_eq!(client.entry_count(), 3u64);
+    let entry2 = client.get_entry(&2u64).expect("entry 2 must exist");
+    assert_eq!(entry2.source, source);
+    assert_ne!(
+        entry2.ledger, entry0.ledger,
+        "the cross-ledger duplicate must record the new ledger sequence"
+    );
+}
