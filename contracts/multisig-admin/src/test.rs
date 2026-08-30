@@ -2,8 +2,14 @@ use super::*;
 use denylist_gate::{DenylistGate, DenylistGateClient};
 use soroban_sdk::{
     testutils::Address as _,
-    vec, Address, Env,
+    vec, Address, Bytes, Env,
 };
+
+/// Build an arbitrary 32-byte payload hash for `__check_auth` calls in tests.
+/// The contract under test does not inspect the payload content.
+fn dummy_payload(env: &Env) -> Hash<32> {
+    env.crypto().sha256(&Bytes::from_array(env, &[0u8; 32]))
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -211,4 +217,66 @@ fn test_signer_update_requires_multisig_auth() {
     assert_eq!(client.get_signers().len(), 3);
     // A separate rejection test for the threshold path is
     // test_threshold_not_met_error_value above.
+}
+
+// ---------------------------------------------------------------------------
+// __check_auth threshold edge cases (M=1, M=N) — #220
+// ---------------------------------------------------------------------------
+
+/// M=1: any single signer's approval is sufficient.
+#[test]
+fn test_check_auth_threshold_one_of_n_succeeds_with_single_signature() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (signers, _id, _client) = setup_multisig(&env, 3, 1);
+
+    let payload = dummy_payload(&env);
+    let sigs = vec![&env, signers.get(0).unwrap()];
+    let result = MultisigAdmin::__check_auth(env.clone(), payload, sigs, Vec::new(&env));
+    assert_eq!(result, Ok(()));
+}
+
+/// M=1: zero signatures still fails even though the threshold is low.
+#[test]
+fn test_check_auth_threshold_one_of_n_fails_with_zero_signatures() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_signers, _id, _client) = setup_multisig(&env, 3, 1);
+
+    let payload = dummy_payload(&env);
+    let sigs: Vec<Address> = Vec::new(&env);
+    let result = MultisigAdmin::__check_auth(env.clone(), payload, sigs, Vec::new(&env));
+    assert_eq!(result, Err(Error::ThresholdNotMet));
+}
+
+/// M=N: every signer must approve; a full set succeeds.
+#[test]
+fn test_check_auth_threshold_n_of_n_succeeds_with_all_signers() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (signers, _id, _client) = setup_multisig(&env, 3, 3);
+
+    let payload = dummy_payload(&env);
+    let sigs = vec![
+        &env,
+        signers.get(0).unwrap(),
+        signers.get(1).unwrap(),
+        signers.get(2).unwrap(),
+    ];
+    let result = MultisigAdmin::__check_auth(env.clone(), payload, sigs, Vec::new(&env));
+    assert_eq!(result, Ok(()));
+}
+
+/// M=N: missing even one signer's approval is rejected.
+#[test]
+fn test_check_auth_threshold_n_of_n_fails_with_one_missing() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (signers, _id, _client) = setup_multisig(&env, 3, 3);
+
+    let payload = dummy_payload(&env);
+    // Only 2 of the 3 required signers approve.
+    let sigs = vec![&env, signers.get(0).unwrap(), signers.get(1).unwrap()];
+    let result = MultisigAdmin::__check_auth(env.clone(), payload, sigs, Vec::new(&env));
+    assert_eq!(result, Err(Error::ThresholdNotMet));
 }
