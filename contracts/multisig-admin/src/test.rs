@@ -280,3 +280,39 @@ fn test_check_auth_threshold_n_of_n_fails_with_one_missing() {
     let result = MultisigAdmin::__check_auth(env.clone(), payload, sigs, Vec::new(&env));
     assert_eq!(result, Err(Error::ThresholdNotMet));
 }
+
+// ---------------------------------------------------------------------------
+// Duplicate-signer double-counting guard — #221
+// ---------------------------------------------------------------------------
+
+/// The same signer approving twice in one signature set must not count as
+/// two approvals toward the threshold: with threshold=2 and only one
+/// distinct signer submitted (twice), the call must be rejected rather than
+/// treated as satisfying the threshold.
+#[test]
+fn test_check_auth_duplicate_signature_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (signers, _id, _client) = setup_multisig(&env, 3, 2);
+
+    let payload = dummy_payload(&env);
+    let solo_signer = signers.get(0).unwrap();
+    // Same signer listed twice — must not be double-counted to reach
+    // threshold=2.
+    let sigs = vec![&env, solo_signer.clone(), solo_signer];
+    let result = MultisigAdmin::__check_auth(env.clone(), payload, sigs, Vec::new(&env));
+    assert_eq!(result, Err(Error::DuplicateSignature));
+}
+
+/// Sanity check: two genuinely distinct signers still satisfy threshold=2.
+#[test]
+fn test_check_auth_distinct_signers_not_flagged_as_duplicate() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (signers, _id, _client) = setup_multisig(&env, 3, 2);
+
+    let payload = dummy_payload(&env);
+    let sigs = vec![&env, signers.get(0).unwrap(), signers.get(1).unwrap()];
+    let result = MultisigAdmin::__check_auth(env.clone(), payload, sigs, Vec::new(&env));
+    assert_eq!(result, Ok(()));
+}
