@@ -386,3 +386,80 @@ fn test_compliance_check_enables_polymorphic_composition() {
     let permitted_codes = soroban_sdk::vec![&env, usa_code.clone()];
     assert!(setup.jurisdiction_flag.is_permitted_jurisdiction(&alice, &permitted_codes));
 }
+
+#[test]
+fn test_integration_with_policy_engine() {
+    use policy_engine::{PolicyEngine, PolicyEngineClient, CheckKind, CombineOp, AddressPair};
+
+    let env = Env::default();
+    let setup = setup_compliance_contracts(&env);
+
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    let charlie = Address::generate(&env);
+    let diana = Address::generate(&env);
+
+    // Initialize policy engine
+    let engine_id = env.register(PolicyEngine, ());
+    let engine = PolicyEngineClient::new(&env, &engine_id);
+    engine.initialize(&setup.issuer, &CombineOp::All);
+
+    // Register denylist-gate and jurisdiction-flag checkkind
+    engine.add_check(
+        &setup.issuer,
+        &CheckKind::Denylist {
+            contract: setup.denylist_gate.address.clone(),
+        },
+    );
+
+    let usa_code = String::from_slice(&env, "US");
+    let permitted_codes = soroban_sdk::vec![&env, usa_code.clone()];
+    engine.add_check(
+        &setup.issuer,
+        &CheckKind::Jurisdiction {
+            contract: setup.jurisdiction_flag.address.clone(),
+            allowed_codes: permitted_codes,
+        },
+    );
+
+    // Set jurisdictions for all
+    setup.jurisdiction_flag.set_jurisdiction(&setup.issuer, &alice, &usa_code);
+    setup.jurisdiction_flag.set_jurisdiction(&setup.issuer, &bob, &usa_code);
+    setup.jurisdiction_flag.set_jurisdiction(&setup.issuer, &charlie, &usa_code);
+    setup.jurisdiction_flag.set_jurisdiction(&setup.issuer, &diana, &usa_code);
+
+    // 1. Both compliant (USA, not denied) -> passes
+    assert!(engine.evaluate(&alice, &bob));
+
+    // 2. Denylisted -> fails
+    setup.denylist_gate.add_to_denylist(&setup.denylist_admin, &alice);
+    assert!(!engine.evaluate(&alice, &bob));
+    setup.denylist_gate.remove_from_denylist(&setup.denylist_admin, &alice);
+
+    // 3. Invalid jurisdiction -> fails
+    let de_code = String::from_slice(&env, "DE");
+    setup.jurisdiction_flag.set_jurisdiction(&setup.issuer, &alice, &de_code);
+    assert!(!engine.evaluate(&alice, &bob));
+
+    // Restore US jurisdiction
+    setup.jurisdiction_flag.set_jurisdiction(&setup.issuer, &alice, &usa_code);
+    assert!(engine.evaluate(&alice, &bob));
+
+    // 4. Batch evaluate works (one passing pair, one failing pair due to Charlie being denylisted)
+    setup.denylist_gate.add_to_denylist(&setup.denylist_admin, &charlie);
+
+    let mut pairs = soroban_sdk::Vec::new(&env);
+    pairs.push_back(AddressPair {
+        from: alice.clone(),
+        to: bob.clone(),
+    });
+    pairs.push_back(AddressPair {
+        from: charlie.clone(),
+        to: diana.clone(),
+    });
+
+    let results = engine.batch_evaluate(&pairs);
+    assert_eq!(results.len(), 2);
+    assert!(results.get(0).unwrap());  // Passes
+    assert!(!results.get(1).unwrap()); // Fails
+}

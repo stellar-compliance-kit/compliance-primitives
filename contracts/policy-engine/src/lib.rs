@@ -91,6 +91,15 @@ pub enum CombineOp {
     Any,
 }
 
+/// Describes a pair of addresses (e.g. sender and recipient) for evaluating
+/// compliance policies on transfers in batches.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AddressPair {
+    pub from: Address,
+    pub to: Address,
+}
+
 #[contracttype]
 #[derive(Clone)]
 enum DataKey {
@@ -263,6 +272,18 @@ impl PolicyEngine {
         Ok(passed)
     }
 
+    /// Evaluate the current policy for multiple address pairs (transfers) in a single call.
+    ///
+    /// Returns a `Vec<bool>` containing the pass/fail status for each pair in the same order.
+    pub fn batch_evaluate(env: Env, pairs: Vec<AddressPair>) -> Result<Vec<bool>, Error> {
+        let mut results = Vec::new(&env);
+        for pair in pairs.iter() {
+            let res = Self::evaluate(env.clone(), pair.from, pair.to)?;
+            results.push_back(res);
+        }
+        Ok(results)
+    }
+
     // -----------------------------------------------------------------------
     // Read-only accessors
     // -----------------------------------------------------------------------
@@ -319,3 +340,7 @@ impl PolicyEngine {
 
 #[cfg(test)]
 mod test;
+
+#[cfg(test)]
+mod fuzz;
+
