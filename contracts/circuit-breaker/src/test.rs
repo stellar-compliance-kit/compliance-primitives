@@ -51,3 +51,39 @@ fn test_non_admin_cannot_freeze_or_unfreeze() {
     assert_eq!(unfreeze_result, Err(Ok(Error::NotAuthorized)));
     assert!(client.is_frozen());
 }
+
+#[test]
+fn test_is_frozen_before_initialize_returns_false() {
+    let env = Env::default();
+    let contract_id = env.register(CircuitBreaker, ());
+    let client = CircuitBreakerClient::new(&env, &contract_id);
+    // Never called `initialize` on this instance. `is_frozen` should
+    // return a sensible default (`false`) rather than panicking.
+    assert!(!client.is_frozen());
+}
+
+#[test]
+fn test_double_freeze_is_idempotent() {
+    let env = Env::default();
+    let (admin, client) = setup(&env);
+
+    // Calling `freeze` twice in a row is a no-op the second time: state
+    // stays frozen and the call itself succeeds rather than erroring.
+    client.freeze(&admin);
+    assert!(client.is_frozen());
+    client.freeze(&admin);
+    assert!(client.is_frozen());
+}
+
+#[test]
+fn test_double_unfreeze_is_idempotent() {
+    let env = Env::default();
+    let (admin, client) = setup(&env);
+
+    // Calling `unfreeze` twice in a row is a no-op the second time: state
+    // stays unfrozen and the call itself succeeds rather than erroring.
+    client.unfreeze(&admin);
+    assert!(!client.is_frozen());
+    client.unfreeze(&admin);
+    assert!(!client.is_frozen());
+}
