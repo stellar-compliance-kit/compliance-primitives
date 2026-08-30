@@ -17,6 +17,8 @@ export interface Config {
   aggregatorContractId: string;
   /** Contract ID of the deployed policy-engine contract (or empty to skip) */
   policyEngineContractId: string;
+  /** Contract ID of the deployed multisig-admin contract (or empty to skip) */
+  multisigContractId: string;
   /** Path to the SQLite database file */
   dbPath: string;
   /** How often to poll for new events, in milliseconds */
@@ -37,19 +39,21 @@ export function loadConfig(): Config {
   const jurisdictionContractId = process.env.JURISDICTION_CONTRACT_ID ?? "";
   const aggregatorContractId   = process.env.AGGREGATOR_CONTRACT_ID   ?? "";
   const policyEngineContractId = process.env.POLICY_ENGINE_CONTRACT_ID ?? "";
+  const multisigContractId = process.env.MULTISIG_CONTRACT_ID ?? "";
 
   if (
     !allowlistContractId &&
     !denylistContractId &&
     !jurisdictionContractId &&
     !aggregatorContractId &&
-    !policyEngineContractId
+    !policyEngineContractId &&
+    !multisigContractId
   ) {
     console.warn(
       "Warning: no contract IDs configured — nothing will be indexed.\n" +
         "Set at least one of ALLOWLIST_CONTRACT_ID, DENYLIST_CONTRACT_ID, " +
         "JURISDICTION_CONTRACT_ID, AGGREGATOR_CONTRACT_ID, " +
-        "POLICY_ENGINE_CONTRACT_ID in your environment."
+        "POLICY_ENGINE_CONTRACT_ID, MULTISIG_CONTRACT_ID in your environment."
     );
   }
 
@@ -61,6 +65,7 @@ export function loadConfig(): Config {
     jurisdictionContractId,
     aggregatorContractId,
     policyEngineContractId,
+    multisigContractId,
     dbPath: process.env.DB_PATH ?? "compliance.db",
     pollIntervalMs: Number(process.env.POLL_INTERVAL_MS ?? "5000"),
     startLedger: Number(process.env.START_LEDGER ?? "0"),

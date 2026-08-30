@@ -16,7 +16,8 @@
  *   event_type      TEXT NOT NULL      — AllowAdd | AllowRemove | Blocked |
  *                                        DenyAdd | DenyRemove | JurisdictionSet |
  *                                        AdminSet | DenylistGateSet |
- *                                        JurisdictionFlagSet | PolicyResult
+ *                                        JurisdictionFlagSet | PolicyResult |
+ *                                        SignerAdd | SignerRm | ThreshSet | AuthOk
  *   address         TEXT               — primary subject address; also holds the
  *                                        newly configured address for aggregator
  *                                        config events (AdminSet etc.)
@@ -26,6 +27,9 @@
  *   policy_from     TEXT               — sender address (PolicyResult only)
  *   policy_to       TEXT               — receiver address (PolicyResult only)
  *   policy_passed   INTEGER            — 1=pass, 0=fail, NULL otherwise
+ *   signer_address  TEXT               — affected signer (SignerAdd/SignerRm only)
+ *   new_threshold   INTEGER            — new threshold value (ThreshSet only)
+ *   valid_count     INTEGER            — valid signature count (AuthOk only)
  *   raw_topics      TEXT NOT NULL      — JSON array of base64-XDR topic strings
  *   raw_data        TEXT NOT NULL      — base64-XDR data value
  *
@@ -51,6 +55,15 @@
  *   config_address   TEXT NOT NULL     — the currently configured address
  *   PRIMARY KEY (contract_id, config_key)
  *
+ * multisig_signers     — current signer set per multisig-admin contract
+ *   contract_id TEXT NOT NULL
+ *   address     TEXT NOT NULL
+ *   PRIMARY KEY (contract_id, address)
+ *
+ * multisig_threshold   — current threshold per multisig-admin contract
+ *   contract_id TEXT PK
+ *   threshold   INTEGER NOT NULL
+ *
  * indexer_state      — internal key/value (stores last_ledger)
  *   key   TEXT PK
  *   value TEXT NOT NULL
@@ -75,6 +88,12 @@ export interface RawEvent {
   policyTo: string | null;
   /** Pass/fail result for PolicyResult events; null for all other event types. */
   policyPassed: boolean | null;
+  /** For multisig SignerAdd / SignerRm: the signer address affected. */
+  signerAddress: string | null;
+  /** For multisig ThreshSet: the new threshold value. */
+  newThreshold: number | null;
+  /** For multisig AuthOk: the number of valid signatures counted. */
+  validCount: number | null;
   rawTopics: string;
   rawData: string;
 }
@@ -124,6 +143,9 @@ export class ComplianceDb {
         policy_from     TEXT,
         policy_to       TEXT,
         policy_passed   INTEGER,
+        signer_address  TEXT,
+        new_threshold   INTEGER,
+        valid_count     INTEGER,
         raw_topics      TEXT    NOT NULL,
         raw_data        TEXT    NOT NULL
       );
@@ -140,6 +162,8 @@ export class ComplianceDb {
         ON events (policy_from);
       CREATE INDEX IF NOT EXISTS idx_events_policy_to
         ON events (policy_to);
+      CREATE INDEX IF NOT EXISTS idx_events_signer
+        ON events (signer_address);
 
       CREATE TABLE IF NOT EXISTS allowlist (
         contract_id TEXT NOT NULL,
@@ -165,6 +189,17 @@ export class ComplianceDb {
         config_key     TEXT NOT NULL,
         config_address TEXT NOT NULL,
         PRIMARY KEY (contract_id, config_key)
+      );
+
+      CREATE TABLE IF NOT EXISTS multisig_signers (
+        contract_id TEXT NOT NULL,
+        address     TEXT NOT NULL,
+        PRIMARY KEY (contract_id, address)
+      );
+
+      CREATE TABLE IF NOT EXISTS multisig_threshold (
+        contract_id TEXT PRIMARY KEY,
+        threshold   INTEGER NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS indexer_state (
@@ -203,8 +238,9 @@ export class ComplianceDb {
          (ledger_sequence, timestamp, contract_id, event_type,
           address, address_to, amount, jurisdiction,
           policy_from, policy_to, policy_passed,
+          signer_address, new_threshold, valid_count,
           raw_topics, raw_data)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         e.ledgerSequence,
         e.timestamp,
@@ -217,6 +253,9 @@ export class ComplianceDb {
         e.policyFrom,
         e.policyTo,
         e.policyPassed === null ? null : e.policyPassed ? 1 : 0,
+        e.signerAddress,
+        e.newThreshold,
+        e.validCount,
         e.rawTopics,
         e.rawData,
       ]
@@ -305,6 +344,39 @@ export class ComplianceDb {
       // policy_passed columns). No separate state table — full evaluation
       // history is queryable directly via:
       //   SELECT * FROM events WHERE event_type='PolicyResult' AND contract_id=?
+
+      // ── multisig-admin events ────────────────────────────────────────────────
+
+      case "SignerAdd":
+        if (e.signerAddress) {
+          this.db.run(
+            "INSERT OR IGNORE INTO multisig_signers (contract_id, address) VALUES (?,?)",
+            [e.contractId, e.signerAddress]
+          );
+        }
+        break;
+
+      case "SignerRm":
+        if (e.signerAddress) {
+          this.db.run(
+            "DELETE FROM multisig_signers WHERE contract_id = ? AND address = ?",
+            [e.contractId, e.signerAddress]
+          );
+        }
+        break;
+
+      case "ThreshSet":
+        if (e.newThreshold !== null) {
+          this.db.run(
+            `INSERT INTO multisig_threshold (contract_id, threshold) VALUES (?,?)
+             ON CONFLICT (contract_id) DO UPDATE SET threshold = excluded.threshold`,
+            [e.contractId, e.newThreshold]
+          );
+        }
+        break;
+
+      // AuthOk: recorded in events log only (valid_count + new_threshold columns),
+      // no separate state table — governance history is queryable via the events log.
     }
   }
 

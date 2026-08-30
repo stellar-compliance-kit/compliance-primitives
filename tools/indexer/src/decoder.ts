@@ -28,6 +28,13 @@
  *   PolicyResult  topics: [Symbol("PolicyResult"), Bool(passed)]
  *                 data:   Vec[Address(from), Address(to)]
  *
+ * For the four event types from multisig-admin:
+ *
+ *   SignerAdd   topics: [Symbol("SignerAdd"), Address(signer)]   data: Void
+ *   SignerRm    topics: [Symbol("SignerRm"),  Address(signer)]   data: Void
+ *   ThreshSet   topics: [Symbol("ThreshSet")]                    data: U32(threshold)
+ *   AuthOk      topics: [Symbol("AuthOk")]                       data: Vec[U32(valid), U32(threshold)]
+ *
  * We parse XDR manually using DataView — no external XDR lib — because the
  * values we need are simple enough and we want zero extra dependencies.
  * If you need full XDR fidelity, swap in @stellar/stellar-base.
@@ -282,6 +289,11 @@ const KNOWN_EVENTS = new Set([
   "JurisdictionFlagSet",
   // policy-engine evaluation event
   "PolicyResult",
+  // multisig-admin events
+  "SignerAdd",
+  "SignerRm",
+  "ThreshSet",
+  "AuthOk",
 ]);
 
 export function decodeEvent(
@@ -308,6 +320,27 @@ export function decodeEvent(
     const timestamp = raw.ledgerClosedAt
       ? Math.floor(new Date(raw.ledgerClosedAt).getTime() / 1000)
       : null;
+
+    // `base` carries every nullable field shared across event families so
+    // each branch below only needs to override the fields it actually sets.
+    const base = {
+      ledgerSequence: raw.ledger,
+      timestamp,
+      contractId: raw.contractId,
+      eventType,
+      address: null,
+      addressTo: null,
+      amount: null,
+      jurisdiction: null,
+      policyFrom: null,
+      policyTo: null,
+      policyPassed: null,
+      signerAddress: null,
+      newThreshold: null,
+      validCount: null,
+      rawTopics: JSON.stringify(raw.topic),
+      rawData: raw.value ?? "",
+    } as const;
 
     // ── compliance-primitives events ─────────────────────────────────────────
 
@@ -340,19 +373,11 @@ export function decodeEvent(
       }
 
       return {
-        ledgerSequence: raw.ledger,
-        timestamp,
-        contractId: raw.contractId,
-        eventType,
+        ...base,
         address,
         addressTo,
         amount,
         jurisdiction,
-        policyFrom: null,
-        policyTo: null,
-        policyPassed: null,
-        rawTopics: JSON.stringify(raw.topic),
-        rawData: raw.value ?? "",
       };
     }
 
@@ -372,20 +397,9 @@ export function decodeEvent(
       if (addrVal.type !== "Address") return null;
 
       return {
-        ledgerSequence: raw.ledger,
-        timestamp,
-        contractId: raw.contractId,
-        eventType,
+        ...base,
         // Reuse `address` to hold the newly configured admin/gate/flag address
         address: addrVal.value,
-        addressTo: null,
-        amount: null,
-        jurisdiction: null,
-        policyFrom: null,
-        policyTo: null,
-        policyPassed: null,
-        rawTopics: JSON.stringify(raw.topic),
-        rawData: raw.value ?? "",
       };
     }
 
@@ -412,19 +426,50 @@ export function decodeEvent(
       }
 
       return {
-        ledgerSequence: raw.ledger,
-        timestamp,
-        contractId: raw.contractId,
-        eventType,
-        address: null,
-        addressTo: null,
-        amount: null,
-        jurisdiction: null,
+        ...base,
         policyFrom,
         policyTo,
         policyPassed: passedVal.value,
-        rawTopics: JSON.stringify(raw.topic),
-        rawData: raw.value ?? "",
+      };
+    }
+
+    // ── multisig-admin events ─────────────────────────────────────────────────
+
+    if (eventType === "SignerAdd" || eventType === "SignerRm") {
+      // topics: [Symbol, Address(signer)]
+      if (raw.topic.length < 2) return null;
+      const signerVal = topics[1];
+      if (signerVal.type !== "Address") return null;
+      return {
+        ...base,
+        signerAddress: signerVal.value,
+      };
+    }
+
+    if (eventType === "ThreshSet") {
+      // topics: [Symbol]  data: U32(threshold)
+      if (dataVal.type !== "U32") return null;
+      return {
+        ...base,
+        newThreshold: dataVal.value,
+      };
+    }
+
+    if (eventType === "AuthOk") {
+      // topics: [Symbol]  data: Vec[U32(valid_count), U32(threshold)]
+      // The Soroban SDK encodes a Rust tuple (u32, u32) as a two-element ScVec.
+      let validCount: number | null = null;
+      let newThreshold: number | null = null;
+      if (dataVal.type === "Vec" && dataVal.value.length === 2) {
+        const v0 = dataVal.value[0];
+        const v1 = dataVal.value[1];
+        if (v0.type === "U32") validCount = v0.value;
+        if (v1.type === "U32") newThreshold = v1.value;
+      }
+      return {
+        ...base,
+        newThreshold,
+        validCount,
       };
     }
 
