@@ -368,6 +368,103 @@ fn test_check_address_no_checks_registered() {
 }
 
 // ---------------------------------------------------------------------------
+// Edge cases (#215): zero checks, single check parity, AND-composition
+// ---------------------------------------------------------------------------
+
+/// Single-check aggregator must behave identically to calling that
+/// underlying check directly: same pass/fail outcome, and the aggregator's
+/// `checks` vector must carry exactly that one result.
+#[test]
+fn test_single_check_matches_direct_call() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let gate_admin = Address::generate(&env);
+    let gate_id = env.register(DenylistGate, ());
+    let gate_client = DenylistGateClient::new(&env, &gate_id);
+    gate_client.initialize(&gate_admin);
+
+    let agg_admin = Address::generate(&env);
+    let agg_id = env.register(ComplianceAggregator, ());
+    let agg_client = ComplianceAggregatorClient::new(&env, &agg_id);
+    agg_client.initialize(&agg_admin, &Some(gate_id.clone()), &None);
+
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    gate_client.add_to_denylist(&gate_admin, &bob);
+
+    // Direct call results.
+    let alice_direct = gate_client.check(&alice);
+    let bob_direct = gate_client.check(&bob);
+
+    // Aggregator results, single check registered.
+    let (alice_all, alice_checks) = agg_client.check_address(&alice, &vec![&env]);
+    let (bob_all, bob_checks) = agg_client.check_address(&bob, &vec![&env]);
+
+    assert_eq!(alice_all, alice_direct);
+    assert_eq!(bob_all, bob_direct);
+    assert_eq!(alice_checks.len(), 1);
+    assert_eq!(bob_checks.len(), 1);
+    assert_eq!(alice_checks.get(0).unwrap().passed, alice_direct);
+    assert_eq!(bob_checks.get(0).unwrap().passed, bob_direct);
+}
+
+/// Zero configured checks must produce the documented `NoChecksRegistered`
+/// error rather than panicking or silently reporting a pass. This is a
+/// second, explicit assertion of that documented contract behavior
+/// (complementing `test_check_address_no_checks_registered` above) that
+/// also checks the same for a freshly-registered (never-initialized-with-
+/// any-check) aggregator instance to rule out any state leakage.
+#[test]
+fn test_zero_checks_is_documented_error_not_panic() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let id = env.register(ComplianceAggregator, ());
+    let client = ComplianceAggregatorClient::new(&env, &id);
+    client.initialize(&admin, &None, &None);
+
+    let addr = Address::generate(&env);
+    // Must not panic: try_* surfaces the error as a Result.
+    let result = std::panic::catch_unwind(|| client.try_check_address(&addr, &vec![&env]));
+    assert!(result.is_ok(), "check_address must not panic on zero checks");
+    assert_eq!(result.unwrap(), Err(Ok(Error::NoChecksRegistered)));
+}
+
+/// This contract only supports AND-composition of registered checks (see
+/// module docs: "all checks here are AND-composed"); there is no OR/nesting
+/// operator, so a literal AND-of-ORs configuration is out of scope for this
+/// contract (that belongs to `policy-engine`, issue #109). This test instead
+/// verifies the AND-composition semantics hold exhaustively across all four
+/// pass/fail combinations of the two registered checks, which is the closest
+/// meaningful analogue available here: `all_passed` must equal the boolean
+/// AND of the individual check results in every case.
+#[test]
+fn test_and_composition_exhaustive_truth_table() {
+    let env = Env::default();
+
+    for (deny_alice, right_jurisdiction) in
+        [(false, true), (false, false), (true, true), (true, false)]
+    {
+        let (gate_admin, gate_id, flag_issuer, flag_id, _, _, client) = setup_all(&env);
+        let alice = Address::generate(&env);
+
+        if deny_alice {
+            deny(&env, &gate_id, &gate_admin, &alice);
+        }
+        if right_jurisdiction {
+            set_jurisdiction(&env, &flag_id, &flag_issuer, &alice, "US");
+        }
+
+        let (all_passed, checks) = client.check_address(&alice, &us_vec(&env));
+        let expected = !deny_alice && right_jurisdiction;
+        assert_eq!(all_passed, expected);
+        assert_eq!(checks.get(0).unwrap().passed, !deny_alice);
+        assert_eq!(checks.get(1).unwrap().passed, right_jurisdiction);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // check_all — batch tests
 // ---------------------------------------------------------------------------
 
