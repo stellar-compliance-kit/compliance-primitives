@@ -28,11 +28,22 @@
 //! as compliance requirements evolve — without redeploying or upgrading the
 //! contract binary. An authorized admin is required for all mutations,
 //! keeping the policy immutable to unprivileged callers.
+//!
+//! ## Upgradeability
+//!
+//! `upgrade(admin, new_wasm_hash)` lets the configured admin move the
+//! contract's code to a new WASM hash via
+//! `env.deployer().update_current_contract_wasm`, following the same
+//! admin-gated pattern used elsewhere in the repo (see `jurisdiction-flag`).
+//! Storage (the admin key, `CombineOp`, and the registered `Checks` vec) is
+//! untouched by the WASM swap, so all state is preserved and the contract
+//! remains fully callable immediately after the upgrade. Only the admin can
+//! call `upgrade`; any other caller is rejected with `Error::NotAuthorized`.
 #![no_std]
 
 use soroban_sdk::{
     contract, contractclient, contracterror, contractevent, contractimpl, contracttype,
-    Address, Env, String, Symbol, Vec,
+    Address, BytesN, Env, String, Symbol, Vec,
 };
 
 // ---------------------------------------------------------------------------
@@ -122,6 +133,14 @@ pub struct PolicyResult {
     pub passed: bool,
     pub from: Address,
     pub to: Address,
+}
+
+/// Emitted whenever the contract is upgraded to a new WASM implementation,
+/// for on-chain auditability of the upgrade path.
+#[contractevent]
+pub struct UpgradePerformed {
+    #[topic]
+    pub admin: Address,
 }
 
 /// Carries information about which check in the list failed and what kind it
@@ -261,6 +280,30 @@ impl PolicyEngine {
         .publish(&env);
 
         Ok(passed)
+    }
+
+    // -----------------------------------------------------------------------
+    // Upgradeability
+    // -----------------------------------------------------------------------
+
+    /// Upgrade the contract to a new WASM implementation. Admin-only.
+    ///
+    /// Calls `update_current_contract_wasm` to swap the running contract
+    /// code. All persistent and instance storage (admin, checks, combine
+    /// op) is preserved across the upgrade since the storage ledger entries
+    /// are untouched by a WASM hash swap. An `UpgradePerformed` event is
+    /// emitted for auditability.
+    ///
+    /// # Security model
+    /// - Only the initialized admin can trigger an upgrade
+    /// - Existing check list, combine op, and admin key survive the upgrade
+    /// - Callers must migrate storage layout changes themselves in the new
+    ///   WASM's `initialize`/migration logic if the storage shape changes
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        UpgradePerformed { admin }.publish(&env);
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
