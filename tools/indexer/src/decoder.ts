@@ -16,6 +16,8 @@
  *   DenyAdd         topics: [Symbol("DenyAdd"), Address]            data: Void
  *   DenyRemove      topics: [Symbol("DenyRemove"), Address]         data: Void
  *   JurisdictionSet topics: [Symbol("JurisdictionSet"), Address]    data: String(code)
+ *   Frozen          topics: [Symbol("Frozen"), Address]             data: Void
+ *   Unfrozen        topics: [Symbol("Unfrozen"), Address]           data: Void
  *
  * We parse XDR manually using DataView — no external XDR lib — because the
  * values we need are simple enough and we want zero extra dependencies.
@@ -260,6 +262,8 @@ const KNOWN_EVENTS = new Set([
   "DenyAdd",
   "DenyRemove",
   "JurisdictionSet",
+  "Frozen",
+  "Unfrozen",
 ]);
 
 export function decodeEvent(
