@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, String};
 
 #[contracttype]
 #[derive(Clone)]
@@ -8,6 +8,15 @@ enum DataKey {
     Admin,
     Frozen,
     PendingAdmin,
+}
+
+/// Version + admin metadata about this contract instance, for tooling that
+/// introspects deployed contracts.
+#[contracttype]
+#[derive(Clone)]
+pub struct Metadata {
+    pub version: String,
+    pub admin: Address,
 }
 
 #[contracterror]
@@ -76,6 +85,20 @@ impl CircuitBreaker {
         env.storage().instance().set(&DataKey::Admin, &new_admin);
         env.storage().instance().remove(&DataKey::PendingAdmin);
         Ok(())
+    }
+
+    /// Returns metadata about this contract instance, including version and
+    /// admin address.
+    pub fn metadata(env: Env) -> Result<Metadata, Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        Ok(Metadata {
+            version: String::from_str(&env, env!("CARGO_PKG_VERSION")),
+            admin,
+        })
     }
 
     fn require_admin(env: &Env, admin: &Address) -> Result<(), Error> {

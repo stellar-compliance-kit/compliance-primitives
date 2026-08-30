@@ -123,3 +123,16 @@ fn test_propose_never_accepted_old_admin_retains_control() {
     let unfreeze_result = client.try_unfreeze(&new_admin);
     assert_eq!(unfreeze_result, Err(Ok(Error::NotAuthorized)));
 }
+
+#[test]
+fn test_metadata_after_initialization() {
+    let env = Env::default();
+    let (admin, client) = setup(&env);
+
+    let metadata = client.metadata();
+    assert_eq!(metadata.admin, admin);
+    assert_eq!(
+        metadata.version,
+        soroban_sdk::String::from_str(&env, env!("CARGO_PKG_VERSION"))
+    );
+}
