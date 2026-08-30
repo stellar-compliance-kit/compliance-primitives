@@ -1,5 +1,5 @@
 use super::*;
-use soroban_sdk::testutils::{Address as _, Events as _};
+use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
 use soroban_sdk::{vec, Env, Symbol};
 
 // ---------------------------------------------------------------------------
@@ -204,3 +204,22 @@ fn test_double_initialize_fails() {
     let result = client.try_initialize(&admin);
     assert_eq!(result, Err(Ok(Error::AlreadyInitialized)));
 }
+
+#[test]
+fn test_get_admin_returns_initialized_admin() {
+    let env = Env::default();
+    let (admin, _contract_id, client) = setup(&env);
+
+    assert_eq!(client.get_admin(), admin);
+}
+
+#[test]
+fn test_get_admin_fails_before_initialize() {
+    let env = Env::default();
+    let contract_id = env.register(AuditLog, ());
+    let client = AuditLogClient::new(&env, &contract_id);
+
+    let result = client.try_get_admin();
+    assert_eq!(result, Err(Ok(Error::NotInitialized)));
+}
+
