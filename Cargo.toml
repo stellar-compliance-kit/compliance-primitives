@@ -10,6 +10,7 @@ members = [
     "contracts/multisig-admin",
     "contracts/policy-engine",
     "examples/circuit-breaker-policy-engine",
+    "contracts/pausable",
     "examples/denylist-gate-consumer",
     "examples/denylist-gate-sep41",
     "examples/jurisdiction-denylist-consumer",
