@@ -14,11 +14,15 @@
  *   timestamp       INTEGER            — Unix seconds (ledger close time)
  *   contract_id     TEXT NOT NULL
  *   event_type      TEXT NOT NULL      — AllowAdd | AllowRemove | Blocked |
- *                                        DenyAdd | DenyRemove | JurisdictionSet
+ *                                        DenyAdd | DenyRemove | JurisdictionSet |
+ *                                        SignerAdd | SignerRm | ThreshSet | AuthOk
  *   address         TEXT               — primary subject address
  *   address_to      TEXT               — secondary address (Blocked only)
  *   amount          TEXT               — i128 as decimal string (Blocked only)
  *   jurisdiction    TEXT               — ISO code (JurisdictionSet only)
+ *   signer_address  TEXT               — affected signer (SignerAdd/SignerRm only)
+ *   new_threshold   INTEGER            — new threshold value (ThreshSet only)
+ *   valid_count     INTEGER            — valid signature count (AuthOk only)
  *   raw_topics      TEXT NOT NULL      — JSON array of base64-XDR topic strings
  *   raw_data        TEXT NOT NULL      — base64-XDR data value
  *
@@ -38,6 +42,15 @@
  *   code        TEXT NOT NULL
  *   PRIMARY KEY (contract_id, address)
  *
+ * multisig_signers     — current signer set per multisig-admin contract
+ *   contract_id TEXT NOT NULL
+ *   address     TEXT NOT NULL
+ *   PRIMARY KEY (contract_id, address)
+ *
+ * multisig_threshold   — current threshold per multisig-admin contract
+ *   contract_id TEXT PK
+ *   threshold   INTEGER NOT NULL
+ *
  * indexer_state      — internal key/value (stores last_ledger)
  *   key   TEXT PK
  *   value TEXT NOT NULL
@@ -56,6 +69,12 @@ export interface RawEvent {
   addressTo: string | null;
   amount: string | null;
   jurisdiction: string | null;
+  /** For multisig SignerAdd / SignerRm: the signer address affected. */
+  signerAddress: string | null;
+  /** For multisig ThreshSet: the new threshold value. */
+  newThreshold: number | null;
+  /** For multisig AuthOk: the number of valid signatures counted. */
+  validCount: number | null;
   rawTopics: string;
   rawData: string;
 }
@@ -102,6 +121,9 @@ export class ComplianceDb {
         address_to      TEXT,
         amount          TEXT,
         jurisdiction    TEXT,
+        signer_address  TEXT,
+        new_threshold   INTEGER,
+        valid_count     INTEGER,
         raw_topics      TEXT    NOT NULL,
         raw_data        TEXT    NOT NULL
       );
@@ -114,6 +136,8 @@ export class ComplianceDb {
         ON events (event_type);
       CREATE INDEX IF NOT EXISTS idx_events_ledger
         ON events (ledger_sequence);
+      CREATE INDEX IF NOT EXISTS idx_events_signer
+        ON events (signer_address);
 
       CREATE TABLE IF NOT EXISTS allowlist (
         contract_id TEXT NOT NULL,
@@ -132,6 +156,17 @@ export class ComplianceDb {
         address     TEXT NOT NULL,
         code        TEXT NOT NULL,
         PRIMARY KEY (contract_id, address)
+      );
+
+      CREATE TABLE IF NOT EXISTS multisig_signers (
+        contract_id TEXT NOT NULL,
+        address     TEXT NOT NULL,
+        PRIMARY KEY (contract_id, address)
+      );
+
+      CREATE TABLE IF NOT EXISTS multisig_threshold (
+        contract_id TEXT PRIMARY KEY,
+        threshold   INTEGER NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS indexer_state (
@@ -168,8 +203,10 @@ export class ComplianceDb {
     this.db.run(
       `INSERT INTO events
          (ledger_sequence, timestamp, contract_id, event_type,
-          address, address_to, amount, jurisdiction, raw_topics, raw_data)
-       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+          address, address_to, amount, jurisdiction,
+          signer_address, new_threshold, valid_count,
+          raw_topics, raw_data)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         e.ledgerSequence,
         e.timestamp,
@@ -179,6 +216,9 @@ export class ComplianceDb {
         e.addressTo,
         e.amount,
         e.jurisdiction,
+        e.signerAddress,
+        e.newThreshold,
+        e.validCount,
         e.rawTopics,
         e.rawData,
       ]
@@ -229,6 +269,37 @@ export class ComplianceDb {
         }
         break;
       // Blocked: recorded in events log only, no state change
+
+      case "SignerAdd":
+        if (e.signerAddress) {
+          this.db.run(
+            "INSERT OR IGNORE INTO multisig_signers (contract_id, address) VALUES (?,?)",
+            [e.contractId, e.signerAddress]
+          );
+        }
+        break;
+
+      case "SignerRm":
+        if (e.signerAddress) {
+          this.db.run(
+            "DELETE FROM multisig_signers WHERE contract_id = ? AND address = ?",
+            [e.contractId, e.signerAddress]
+          );
+        }
+        break;
+
+      case "ThreshSet":
+        if (e.newThreshold !== null) {
+          this.db.run(
+            `INSERT INTO multisig_threshold (contract_id, threshold) VALUES (?,?)
+             ON CONFLICT (contract_id) DO UPDATE SET threshold = excluded.threshold`,
+            [e.contractId, e.newThreshold]
+          );
+        }
+        break;
+
+      // AuthOk: recorded in events log only (valid_count + new_threshold columns),
+      // no separate state table — governance history is queryable via the events log.
     }
   }
 

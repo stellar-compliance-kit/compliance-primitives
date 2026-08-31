@@ -6,9 +6,7 @@ members = [
     "contracts/compliance-aggregator",
     "contracts/denylist-gate",
     "contracts/jurisdiction-flag",
-    "contracts/multisig-admin",
-    "contracts/circuit-breaker",
-    "contracts/policy-engine",
+    "contracts/pausable",
     "examples/denylist-gate-consumer",
     "examples/jurisdiction-denylist-consumer",
 ]
