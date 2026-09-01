@@ -102,6 +102,29 @@ docker run --rm \
 
 ---
 
+## npm package
+
+The indexer is published as `compliance-indexer` with compiled JavaScript and TypeScript declarations. Install a released version in an issuer or reporting service with:
+
+```sh
+npm install compliance-indexer
+```
+
+The package root exposes the reusable `SorobanRpc`, `Indexer`, `ComplianceDb`, and event-decoding primitives without starting the poll loop. The command-line runner remains available as `compliance-indexer` after building or installing the package.
+
+```ts
+import { ComplianceDb, Indexer, loadConfig } from "compliance-indexer";
+
+const config = loadConfig();
+const db = await ComplianceDb.open(config.dbPath);
+const indexer = new Indexer(config, db);
+indexer.start();
+```
+
+The repository’s `prepublishOnly` hook runs typechecking, lint, build, and tests before a release is packed.
+
+---
+
 ## Configuration (`.env`)
 
 | Variable | Default | Description |
