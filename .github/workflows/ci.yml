@@ -104,6 +104,69 @@ jobs:
       - name: Run cargo-deny
         uses: EmbarkStudios/cargo-deny-action@v2
 
+  docs-interfaces-diff:
+    name: docs/interfaces diff check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install stellar CLI
+        run: |
+          curl -s https://raw.githubusercontent.com/stellar/stellar-cli/master/install.sh | bash
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Regenerate interface docs
+        run: ./scripts/regenerate-docs.sh
+      - name: Check for differences
+        run: |
+          if git diff --exit-code docs/interfaces/ > /dev/null; then
+            echo "✓ docs/interfaces is up to date"
+          else
+            echo "✗ docs/interfaces is out of date. Run ./scripts/regenerate-docs.sh and commit the changes."
+            git diff docs/interfaces/
+            exit 1
+          fi
+
+  examples-test:
+    name: test all examples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Enumerate and test examples
+        run: |
+          set -e
+          EXAMPLES_DIR="examples"
+          FAILED_CRATES=()
+
+          echo "Testing all example crates..."
+          for dir in "$EXAMPLES_DIR"/*; do
+            if [ -d "$dir" ]; then
+              CRATE_NAME=$(basename "$dir")
+              if [ -f "$dir/Cargo.toml" ]; then
+                echo "Testing $CRATE_NAME..."
+                if ! cargo test -p "$CRATE_NAME" --verbose; then
+                  FAILED_CRATES+=("$CRATE_NAME")
+                fi
+              else
+                echo "ERROR: Directory $dir exists but has no Cargo.toml"
+                exit 1
+              fi
+            fi
+          done
+
+          if [ ${#FAILED_CRATES[@]} -ne 0 ]; then
+            echo "ERROR: The following example crates failed tests:"
+            printf '  - %s\n' "${FAILED_CRATES[@]}"
+            exit 1
+          fi
+
+          echo "All example crates passed tests."
+
   changelog-version-sync:
     name: changelog version sync check
     runs-on: ubuntu-latest
