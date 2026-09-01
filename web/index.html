@@ -32,6 +32,7 @@
   </div>
 </nav>
 
+<main>
 <header class="hero" id="top">
   <div class="wrap">
     <span class="badge">Soroban &middot; Stellar</span>
@@ -139,7 +140,7 @@
       deploy in front of an existing SEP-41 token, which still delegates the
       real transfer to the underlying token contract.
     </p>
-    <div class="flow">
+    <div class="flow" tabindex="0" role="region" aria-label="Composition call flow diagram">
       <pre>issuer's token contract
   transfer(from, to, amount)
     &rarr; denylist-gate.check(from)         (cross-contract call)
@@ -157,7 +158,7 @@
 <section id="quick-start">
   <div class="wrap">
     <h2>Quick start</h2>
-    <pre class="code"><span class="comment"># Clone</span>
+    <pre class="code" tabindex="0" role="region" aria-label="Quick start shell commands"><span class="comment"># Clone</span>
 git clone https://github.com/stellar-compliance-kit/compliance-primitives.git
 cd compliance-primitives
 
@@ -178,6 +179,7 @@ stellar contract deploy \
   --network testnet</pre>
   </div>
 </section>
+</main>
 
 <footer>
   <div class="wrap">
