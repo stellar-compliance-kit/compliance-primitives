@@ -123,6 +123,7 @@ pub enum Error {
     PolicyViolation = 4,
     /// `batch_evaluate` was called with more than `MAX_BATCH_SIZE` addresses.
     BatchTooLarge = 5,
+    ContractPaused = 6,
 }
 
 /// Emitted by `evaluate` regardless of the pass/fail outcome so that
@@ -175,12 +176,34 @@ impl PolicyEngine {
         Ok(())
     }
 
+    /// Pause policy mutations (`add_check` / `remove_check`). Admin-only.
+    pub fn pause(env: Env, admin: Address) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        compliance_pausable::pause(&env);
+        env.events().publish((), soroban_sdk::symbol_short!("Paused"));
+        Ok(())
+    }
+
+    /// Resume policy mutations after a pause. Admin-only.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        compliance_pausable::unpause(&env);
+        env.events().publish((), soroban_sdk::symbol_short!("Unpaused"));
+        Ok(())
+    }
+
+    /// Check if the contract is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        compliance_pausable::is_paused(&env)
+    }
+
     // -----------------------------------------------------------------------
     // Admin mutations
     // -----------------------------------------------------------------------
 
     /// Append a new `check` to the end of the policy list. Admin-only.
     pub fn add_check(env: Env, admin: Address, check: CheckKind) -> Result<(), Error> {
+        compliance_pausable::require_not_paused_or(&env, Error::ContractPaused)?;
         Self::require_admin(&env, &admin)?;
         let mut checks: Vec<CheckKind> = env
             .storage()
@@ -195,6 +218,7 @@ impl PolicyEngine {
     /// Remove the check at position `index` from the policy list.
     /// Admin-only. Indices shift down after removal (Vec::remove semantics).
     pub fn remove_check(env: Env, admin: Address, index: u32) -> Result<(), Error> {
+        compliance_pausable::require_not_paused_or(&env, Error::ContractPaused)?;
         Self::require_admin(&env, &admin)?;
         let mut checks: Vec<CheckKind> = env
             .storage()

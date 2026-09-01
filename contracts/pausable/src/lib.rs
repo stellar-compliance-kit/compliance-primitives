@@ -62,5 +62,25 @@ pub fn require_not_paused(env: &Env) {
     }
 }
 
+/// Returns `Err(err)` if the contract is currently paused, `Ok(())` otherwise.
+///
+/// Use this instead of [`require_not_paused`] in entry points that surface
+/// pause state as a typed contract error (via `?`) rather than panicking,
+/// e.g.:
+///
+/// ```ignore
+/// pub fn transfer(env: Env, ...) -> Result<(), Error> {
+///     pausable::require_not_paused_or(&env, Error::ContractPaused)?;
+///     // ...
+/// }
+/// ```
+pub fn require_not_paused_or<E>(env: &Env, err: E) -> Result<(), E> {
+    if is_paused(env) {
+        Err(err)
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod test;

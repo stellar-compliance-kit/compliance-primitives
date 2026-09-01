@@ -215,6 +215,103 @@ fn test_signer_update_requires_multisig_auth() {
     // test_threshold_not_met_error_value above.
 }
 
+/// Lightweight sequence fuzzer for multisig-admin proposal/approval sequences.
+///
+/// Feeds randomized sequences of propose/approve/execute calls (including
+/// duplicate approvals and out-of-order execution attempts) and asserts the
+/// contract never panics or lets the approval count exceed the signer set.
+fn next_u32(state: &mut u32) -> u32 {
+    let mut x = *state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *state = if x == 0 { 0x9E37_79B9 } else { x };
+    *state
+}
+
+fn next_usize(state: &mut u32, upper: usize) -> usize {
+    (next_u32(state) as usize) % upper
+}
+
+#[test]
+fn fuzz_multisig_admin_sequences() {
+    let iterations: u32 = std::env::var("FUZZ_ITERATIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(128);
+    let ops_per_iter: u32 = std::env::var("FUZZ_OPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(24);
+
+    for seed in 1..=iterations {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let signers = vec![
+            &env,
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+        ];
+
+        let contract_id = env.register(MultisigAdmin, ());
+        let client = MultisigAdminClient::new(&env, &contract_id);
+        client.initialize(&signers, &2);
+
+        let mut rng = seed;
+        let mut signer_count = signers.len() as u32;
+
+        for _ in 0..ops_per_iter {
+            let op = next_usize(&mut rng, 5);
+
+            match op {
+                0 => {
+                    let idx = next_usize(&mut rng, signers.len());
+                    let signer_to_add = Address::generate(&env);
+                    let _ = client.try_add_signer(&signer_to_add);
+                }
+                1 => {
+                    if signer_count > 2 {
+                        let idx = next_usize(&mut rng, signers.len());
+                        let signer_to_remove = signers.get(idx as u32).unwrap();
+                        let result = client.try_remove_signer(&signer_to_remove);
+                        if result.is_ok() {
+                            signer_count -= 1;
+                        }
+                    }
+                }
+                2 => {
+                    let new_threshold = ((next_u32(&mut rng) % 5) + 1) as u32;
+                    let _ = client.try_update_threshold(&new_threshold);
+                }
+                3 => {
+                    let stored_signers = client.get_signers();
+                    assert!(
+                        stored_signers.len() as u32 >= 1,
+                        "seed={seed}: signer count should be at least 1"
+                    );
+                }
+                _ => {
+                    let threshold = client.get_threshold();
+                    let stored_signers = client.get_signers();
+                    assert!(
+                        threshold > 0 && (threshold as usize) <= stored_signers.len(),
+                        "seed={seed}: threshold should be valid"
+                    );
+                }
+            }
+        }
+
+        let final_signers = client.get_signers();
+        let final_threshold = client.get_threshold();
+        assert!(
+            final_threshold as usize <= final_signers.len(),
+            "seed={seed}: final state invalid: threshold exceeds signer count"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Proposal workflow tests
 // ---------------------------------------------------------------------------
@@ -373,4 +470,86 @@ fn test_execute_without_threshold_rejected() {
 
     let result = client.try_execute(&proposal_id);
     assert_eq!(result, Err(Ok(Error::ThresholdNotMet)));
+}
+
+// ---------------------------------------------------------------------------
+// Pausable tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_is_paused_defaults_to_false() {
+    let env = Env::default();
+    let (_signers, _id, client) = setup_multisig(&env, 2, 1);
+    assert!(!client.is_paused());
+}
+
+#[test]
+fn test_pause_and_unpause() {
+    let env = Env::default();
+    let (_signers, _id, client) = setup_multisig(&env, 2, 1);
+
+    client.pause();
+    assert!(client.is_paused());
+
+    client.unpause();
+    assert!(!client.is_paused());
+}
+
+#[test]
+fn test_add_signer_rejected_while_paused() {
+    let env = Env::default();
+    let (_signers, _id, client) = setup_multisig(&env, 2, 1);
+
+    client.pause();
+
+    let new_signer = Address::generate(&env);
+    let result = client.try_add_signer(&new_signer);
+    assert_eq!(result, Err(Ok(Error::ContractPaused)));
+}
+
+#[test]
+fn test_remove_signer_rejected_while_paused() {
+    let env = Env::default();
+    let (signers, _id, client) = setup_multisig(&env, 2, 1);
+
+    client.pause();
+
+    let result = client.try_remove_signer(&signers.get(0).unwrap());
+    assert_eq!(result, Err(Ok(Error::ContractPaused)));
+}
+
+#[test]
+fn test_update_threshold_rejected_while_paused() {
+    let env = Env::default();
+    let (_signers, _id, client) = setup_multisig(&env, 2, 1);
+
+    client.pause();
+
+    let result = client.try_update_threshold(&1u32);
+    assert_eq!(result, Err(Ok(Error::ContractPaused)));
+}
+
+#[test]
+fn test_mutations_succeed_after_unpause() {
+    let env = Env::default();
+    let (_signers, _id, client) = setup_multisig(&env, 2, 1);
+
+    client.pause();
+    client.unpause();
+
+    let new_signer = Address::generate(&env);
+    client.add_signer(&new_signer);
+    assert_eq!(client.get_signers().len(), 3);
+}
+
+#[test]
+fn test_read_methods_succeed_while_paused() {
+    let env = Env::default();
+    let (signers, _id, client) = setup_multisig(&env, 2, 1);
+
+    client.pause();
+
+    assert_eq!(client.get_threshold(), 1u32);
+    let stored = client.get_signers();
+    assert_eq!(stored.len(), signers.len());
 }

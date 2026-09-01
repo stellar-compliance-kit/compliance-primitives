@@ -47,7 +47,7 @@
 
 use soroban_sdk::{
     auth::{Context, CustomAccountInterface},
-    contract, contracterror, contractimpl, contracttype,
+    contract, contracterror, contractevent, contractimpl, contracttype,
     crypto::Hash,
     Address, Env, Vec,
 };
@@ -149,6 +149,8 @@ pub enum Error {
     ExpiredProposal = 7,
     /// The proposal with the given ID does not exist.
     ProposalNotFound = 8,
+    /// Contract is paused.
+    ContractPaused = 9,
 }
 
 // ---------------------------------------------------------------------------
@@ -185,6 +187,27 @@ impl MultisigAdmin {
         Ok(())
     }
 
+    /// Pause the contract to prevent new proposals/approvals. Requires multisig threshold.
+    pub fn pause(env: Env) -> Result<(), Error> {
+        env.current_contract_address().require_auth();
+        compliance_pausable::pause(&env);
+        env.events().publish((), soroban_sdk::symbol_short!("Paused"));
+        Ok(())
+    }
+
+    /// Resume operations after a pause. Requires multisig threshold.
+    pub fn unpause(env: Env) -> Result<(), Error> {
+        env.current_contract_address().require_auth();
+        compliance_pausable::unpause(&env);
+        env.events().publish((), soroban_sdk::symbol_short!("Unpaused"));
+        Ok(())
+    }
+
+    /// Check if the contract is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        compliance_pausable::is_paused(&env)
+    }
+
     // -----------------------------------------------------------------------
     // Signer-set management (all require the current multisig threshold)
     // -----------------------------------------------------------------------
@@ -192,6 +215,7 @@ impl MultisigAdmin {
     /// Add `new_signer` to the signer set. Requires the current M-of-N
     /// threshold to be met (the call goes through `__check_auth`).
     pub fn add_signer(env: Env, new_signer: Address) -> Result<(), Error> {
+        compliance_pausable::require_not_paused_or(&env, Error::ContractPaused)?;
         // Require auth from this contract itself — satisfied by __check_auth.
         env.current_contract_address().require_auth();
 
@@ -217,6 +241,7 @@ impl MultisigAdmin {
     /// Remove `signer` from the signer set. Requires the current M-of-N
     /// threshold. The resulting signer count must still be >= threshold.
     pub fn remove_signer(env: Env, signer: Address) -> Result<(), Error> {
+        compliance_pausable::require_not_paused_or(&env, Error::ContractPaused)?;
         env.current_contract_address().require_auth();
 
         let mut signers: Vec<Address> = env
@@ -254,6 +279,7 @@ impl MultisigAdmin {
 
     /// Update the signing threshold. Requires the current M-of-N threshold.
     pub fn update_threshold(env: Env, threshold: u32) -> Result<(), Error> {
+        compliance_pausable::require_not_paused_or(&env, Error::ContractPaused)?;
         env.current_contract_address().require_auth();
 
         let signers: Vec<Address> = env
@@ -302,6 +328,7 @@ impl MultisigAdmin {
         payload: soroban_sdk::Bytes,
         expiry_ledger: u32,
     ) -> Result<u64, Error> {
+        compliance_pausable::require_not_paused_or(&env, Error::ContractPaused)?;
         let current_ledger = env.ledger().sequence();
         if expiry_ledger <= current_ledger {
             return Err(Error::ExpiredProposal);
@@ -339,6 +366,7 @@ impl MultisigAdmin {
     /// only approve once. Returns true if the proposal now has enough approvals
     /// to execute.
     pub fn approve(env: Env, proposal_id: u64, approver: Address) -> Result<bool, Error> {
+        compliance_pausable::require_not_paused_or(&env, Error::ContractPaused)?;
         let current_ledger = env.ledger().sequence();
 
         let mut proposal: Proposal = env
