@@ -1216,6 +1216,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "multisig-aggregator"
+version = "0.1.0"
+dependencies = [
+ "compliance-aggregator",
+ "denylist-gate",
+ "jurisdiction-flag",
+ "multisig-admin",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "multisig-audit-trail"
 version = "0.1.0"
 dependencies = [
@@ -1316,6 +1327,17 @@ dependencies = [
  "compliance-pausable",
  "denylist-gate",
  "jurisdiction-flag",
+ "soroban-sdk",
+]
+
+[[package]]
+name = "policy-engine-audit"
+version = "0.1.0"
+dependencies = [
+ "audit-log",
+ "denylist-gate",
+ "jurisdiction-flag",
+ "policy-engine",
  "soroban-sdk",
 ]
 

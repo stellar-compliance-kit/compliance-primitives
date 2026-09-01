@@ -15,7 +15,9 @@ members = [
     "examples/denylist-gate-sep41",
     "examples/jurisdiction-denylist-consumer",
     "examples/jurisdiction-flag-consumer",
+    "examples/multisig-aggregator",
     "examples/multisig-audit-trail",
+    "examples/policy-engine-audit",
     "examples/rwa-compliance-flow",
     "examples/rwa-token",
 ]

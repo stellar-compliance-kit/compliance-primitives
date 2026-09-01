@@ -20,7 +20,13 @@ For details on how issues are triaged, labeled, and prioritized, see
 4. **Add tests.** Every public function needs coverage for its happy path
    and at least one failure/auth case. New functionality without tests
    won't be merged.
-5. **If you've changed any public function signature or interface-related
+5. **If you've changed a `DataKey` enum or any other `#[contracttype]` used
+   for storage in a contract with (or expected to gain) an `upgrade()`
+   entrypoint**, read
+   [`STORAGE_VERSIONING.md`](./STORAGE_VERSIONING.md) first — some
+   storage-layout changes require a documented migration path before they
+   can ship.
+6. **If you've changed any public function signature or interface-related
    attribute on a contract, regenerate the docs interfaces:**
    ```sh
    ./scripts/regenerate-docs.sh
