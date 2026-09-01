@@ -8,7 +8,7 @@
  *   topic[1+] = the fields annotated #[topic] in declaration order
  *   data      = ScVal — struct-value encoding of any non-topic fields
  *
- * For the five event types from compliance primitives:
+ * For the six event types from compliance primitives:
  *
  *   AllowAdd        topics: [Symbol("AllowAdd"), Address]          data: Void
  *   AllowRemove     topics: [Symbol("AllowRemove"), Address]        data: Void
@@ -23,6 +23,17 @@
  *   SignerRm    topics: [Symbol("SignerRm"),  Address(signer)]   data: Void
  *   ThreshSet   topics: [Symbol("ThreshSet")]                    data: U32(threshold)
  *   AuthOk      topics: [Symbol("AuthOk")]                       data: Vec[U32(valid), U32(threshold)]
+ *
+ * For the three configuration events from compliance-aggregator:
+ *
+ *   AdminSet            topics: [Symbol("AdminSet"),            Address(admin)]  data: Void
+ *   DenylistGateSet     topics: [Symbol("DenylistGateSet"),     Address(gate)]   data: Void
+ *   JurisdictionFlagSet topics: [Symbol("JurisdictionFlagSet"), Address(flag)]   data: Void
+ *
+ * For the evaluation event from policy-engine:
+ *
+ *   PolicyResult  topics: [Symbol("PolicyResult"), Bool(passed)]
+ *                 data:   Vec[Address(from), Address(to)]
  *
  * We parse XDR manually using DataView — no external XDR lib — because the
  * values we need are simple enough and we want zero extra dependencies.
@@ -135,6 +146,7 @@ class XdrReader {
 
 type ScVal =
   | { type: "Void" }
+  | { type: "Bool"; value: boolean }
   | { type: "Symbol"; value: string }
   | { type: "String"; value: string }
   | { type: "Address"; value: string }
@@ -146,6 +158,9 @@ type ScVal =
 function decodeScVal(r: XdrReader): ScVal {
   const disc = r.readU32();
   switch (disc) {
+    case ScType.Bool:
+      return { type: "Bool", value: r.readU32() !== 0 };
+
     case ScType.Void:
       return { type: "Void" };
 
@@ -273,6 +288,12 @@ const KNOWN_EVENTS = new Set([
   "SignerRm",
   "ThreshSet",
   "AuthOk",
+  // compliance-aggregator configuration events
+  "AdminSet",
+  "DenylistGateSet",
+  "JurisdictionFlagSet",
+  // policy-engine evaluation event
+  "PolicyResult",
 ]);
 
 export function decodeEvent(
@@ -295,6 +316,10 @@ export function decodeEvent(
       raw.value
         ? decodeScVal(new XdrReader(base64ToBytes(raw.value)))
         : { type: "Void" as const };
+
+    const timestamp = raw.ledgerClosedAt
+      ? Math.floor(new Date(raw.ledgerClosedAt).getTime() / 1000)
+      : null;
 
     // ── compliance-primitives events ─────────────────────────────────────────
 
@@ -326,10 +351,6 @@ export function decodeEvent(
         if (dataVal.type === "String") jurisdiction = dataVal.value;
       }
 
-      const timestamp = raw.ledgerClosedAt
-        ? Math.floor(new Date(raw.ledgerClosedAt).getTime() / 1000)
-        : null;
-
       return {
         ledgerSequence: raw.ledger,
         timestamp,
@@ -342,16 +363,15 @@ export function decodeEvent(
         signerAddress: null,
         newThreshold: null,
         validCount: null,
+        policyFrom: null,
+        policyTo: null,
+        policyPassed: null,
         rawTopics: JSON.stringify(raw.topic),
         rawData: raw.value ?? "",
       };
     }
 
     // ── multisig-admin events ─────────────────────────────────────────────────
-
-    const timestamp = raw.ledgerClosedAt
-      ? Math.floor(new Date(raw.ledgerClosedAt).getTime() / 1000)
-      : null;
 
     const base = {
       ledgerSequence: raw.ledger,
@@ -362,6 +382,9 @@ export function decodeEvent(
       addressTo: null,
       amount: null,
       jurisdiction: null,
+      policyFrom: null,
+      policyTo: null,
+      policyPassed: null,
       rawTopics: JSON.stringify(raw.topic),
       rawData: raw.value ?? "",
     } as const;
@@ -406,6 +429,64 @@ export function decodeEvent(
         signerAddress: null,
         newThreshold,
         validCount,
+      };
+    }
+
+    // ── compliance-aggregator configuration events ────────────────────────────
+    //
+    // AdminSet, DenylistGateSet, JurisdictionFlagSet all share the same shape:
+    //   topics: [Symbol(name), Address(configured_contract_or_admin)]
+    //   data:   Void
+
+    if (
+      eventType === "AdminSet" ||
+      eventType === "DenylistGateSet" ||
+      eventType === "JurisdictionFlagSet"
+    ) {
+      if (raw.topic.length < 2) return null;
+      const addrVal = topics[1];
+      if (addrVal.type !== "Address") return null;
+
+      return {
+        ...base,
+        // Reuse `address` to hold the newly configured admin/gate/flag address
+        address: addrVal.value,
+        signerAddress: null,
+        newThreshold: null,
+        validCount: null,
+      };
+    }
+
+    // ── policy-engine evaluation event ───────────────────────────────────────
+    //
+    // PolicyResult:
+    //   topics: [Symbol("PolicyResult"), Bool(passed)]
+    //   data:   Vec[Address(from), Address(to)]
+
+    if (eventType === "PolicyResult") {
+      if (raw.topic.length < 2) return null;
+      const passedVal = topics[1];
+      if (passedVal.type !== "Bool") return null;
+
+      let policyFrom: string | null = null;
+      let policyTo: string | null = null;
+
+      // data is Vec[Address(from), Address(to)]
+      if (dataVal.type === "Vec" && dataVal.value.length >= 2) {
+        const fromVal = dataVal.value[0];
+        const toVal = dataVal.value[1];
+        if (fromVal.type === "Address") policyFrom = fromVal.value;
+        if (toVal.type === "Address") policyTo = toVal.value;
+      }
+
+      return {
+        ...base,
+        signerAddress: null,
+        newThreshold: null,
+        validCount: null,
+        policyFrom,
+        policyTo,
+        policyPassed: passedVal.value,
       };
     }
 

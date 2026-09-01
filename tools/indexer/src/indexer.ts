@@ -64,6 +64,8 @@ export class Indexer {
       this.config.denylistContractId,
       this.config.jurisdictionContractId,
       this.config.multisigContractId,
+      this.config.aggregatorContractId,
+      this.config.policyEngineContractId,
     ].filter(Boolean);
 
     if (contractIds.length === 0) {
