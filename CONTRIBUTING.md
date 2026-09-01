@@ -33,7 +33,13 @@ For details on how issues are triaged, labeled, and prioritized, see
    make lint
    ```
    Both must pass locally — the same checks run in CI on every PR.
-7. **Open a pull request** against `main`, referencing the issue it closes
+7. **If your change touches `contracts/multisig-admin` or
+   `contracts/circuit-breaker`**, work through
+   [`docs/admin-control-review-checklist.md`](./docs/admin-control-review-checklist.md)
+   before opening the PR — these two contracts have a larger blast radius
+   than the rest of the workspace, and the PR template will ask you to
+   confirm you've done this.
+8. **Open a pull request** against `main`, referencing the issue it closes
    (e.g. `Closes #12`). Describe what changed and why.
 
 ## Complexity labels and expected PR size
@@ -65,6 +71,58 @@ wrong, or the issue may need to be split.
 Comment on the issue to let others know you're working on it. If you go
 quiet for a while, don't worry — someone else may pick it up, and you're
 welcome to jump back in on something else.
+
+## Fuzz targets
+
+This repo uses lightweight seeded-PRNG sequence fuzzers inside each
+contract's `#[cfg(test)]` tree rather than a separate `cargo-fuzz`
+workspace — see [`/fuzz/README.md`](./fuzz/README.md) for the full
+rationale and the list of contracts already covered.
+
+**Running the existing fuzz targets locally:**
+
+```sh
+# Short run (also covered by `cargo test` / CI), e.g. jurisdiction-flag
+cargo test -p jurisdiction-flag fuzz_jurisdiction_set_get_sequences -- --nocapture
+
+# Periodic longer campaign — run after non-trivial changes to the
+# fuzzed functions, or as part of a release checklist
+FUZZ_ITERATIONS=2000 FUZZ_OPS=64 \
+  cargo test -p jurisdiction-flag fuzz_jurisdiction_set_get_sequences -- --nocapture
+```
+
+A failing run prints the failing `seed`, so the exact operation sequence
+that triggered it is reproducible by re-running with that seed.
+
+**Adding a new fuzz target for a contract:**
+
+1. Add a `fuzz.rs` module to the contract crate (see
+   `contracts/jurisdiction-flag/src/fuzz.rs` for the reference shape) and
+   wire it in with `#[cfg(test)] mod fuzz;` in `lib.rs`.
+2. Write a tiny xorshift-style PRNG (or reuse the pattern from an existing
+   `fuzz.rs`) to generate a bounded sequence of random operations against
+   the contract's public functions, using `soroban_sdk::testutils` to set
+   up the `Env`, `mock_all_auths`, and generated `Address`es.
+3. After each generated operation, assert the invariant(s) that must hold
+   regardless of the operation sequence (e.g. "last write wins", "a
+   read-only check's result is consistent with the underlying state").
+4. Read iteration/operation counts from env vars (e.g. `FUZZ_ITERATIONS`,
+   `FUZZ_OPS`) with small defaults so the target runs quickly under normal
+   `cargo test` / CI, and print the seed on failure so a crash is
+   reproducible.
+5. Document the new target in [`/fuzz/README.md`](./fuzz/README.md):
+   the harness location, the invariants it checks, and the short-run vs.
+   longer-campaign commands.
+
+**Interpreting a crash artifact:** since these are plain `#[test]` loops
+rather than libFuzzer targets, a failure surfaces as a normal test
+failure — there's no binary corpus file to inspect. Each iteration's
+`seed` doubles as its loop index (`1..=FUZZ_ITERATIONS`) and is included
+in every assertion message (e.g. `seed=57 addr=2: last-write-wins
+mismatch`), so the run is already deterministic and reproducible: rerun
+with `FUZZ_ITERATIONS` set to at least that seed and add a temporary
+`if seed == 57 { std::eprintln!("{:?}", ...); }` (or similar) inside the
+loop to print the operation sequence and state at the point of failure.
 
 ## Code style
 
