@@ -19,6 +19,8 @@ export interface Config {
   aggregatorContractId: string;
   /** Contract ID of the deployed policy-engine contract (or empty to skip) */
   policyEngineContractId: string;
+  /** Contract ID of the deployed circuit-breaker contract (or empty to skip) */
+  circuitBreakerContractId: string;
   /** Path to the SQLite database file */
   dbPath: string;
   /** How often to poll for new events, in milliseconds */
@@ -34,12 +36,13 @@ export function loadConfig(): Config {
     process.env.NETWORK_PASSPHRASE ??
     "Test SDF Network ; September 2015";
 
-  const allowlistContractId    = process.env.ALLOWLIST_CONTRACT_ID    ?? "";
-  const denylistContractId     = process.env.DENYLIST_CONTRACT_ID     ?? "";
-  const jurisdictionContractId = process.env.JURISDICTION_CONTRACT_ID ?? "";
-  const multisigContractId     = process.env.MULTISIG_CONTRACT_ID     ?? "";
-  const aggregatorContractId   = process.env.AGGREGATOR_CONTRACT_ID   ?? "";
-  const policyEngineContractId = process.env.POLICY_ENGINE_CONTRACT_ID ?? "";
+  const allowlistContractId     = process.env.ALLOWLIST_CONTRACT_ID     ?? "";
+  const denylistContractId      = process.env.DENYLIST_CONTRACT_ID      ?? "";
+  const jurisdictionContractId  = process.env.JURISDICTION_CONTRACT_ID  ?? "";
+  const multisigContractId      = process.env.MULTISIG_CONTRACT_ID      ?? "";
+  const aggregatorContractId    = process.env.AGGREGATOR_CONTRACT_ID    ?? "";
+  const policyEngineContractId  = process.env.POLICY_ENGINE_CONTRACT_ID ?? "";
+  const circuitBreakerContractId = process.env.CIRCUIT_BREAKER_CONTRACT_ID ?? "";
 
   if (
     !allowlistContractId &&
@@ -47,13 +50,14 @@ export function loadConfig(): Config {
     !jurisdictionContractId &&
     !multisigContractId &&
     !aggregatorContractId &&
-    !policyEngineContractId
+    !policyEngineContractId &&
+    !circuitBreakerContractId
   ) {
     console.warn(
       "Warning: no contract IDs configured — nothing will be indexed.\n" +
         "Set at least one of ALLOWLIST_CONTRACT_ID, DENYLIST_CONTRACT_ID, " +
         "JURISDICTION_CONTRACT_ID, MULTISIG_CONTRACT_ID, AGGREGATOR_CONTRACT_ID, " +
-        "POLICY_ENGINE_CONTRACT_ID in your environment."
+        "POLICY_ENGINE_CONTRACT_ID, CIRCUIT_BREAKER_CONTRACT_ID in your environment."
     );
   }
 
@@ -66,6 +70,7 @@ export function loadConfig(): Config {
     multisigContractId,
     aggregatorContractId,
     policyEngineContractId,
+    circuitBreakerContractId,
     dbPath: process.env.DB_PATH ?? "compliance.db",
     pollIntervalMs: Number(process.env.POLL_INTERVAL_MS ?? "5000"),
     startLedger: Number(process.env.START_LEDGER ?? "0"),

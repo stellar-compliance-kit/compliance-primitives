@@ -66,6 +66,7 @@ export class Indexer {
       this.config.multisigContractId,
       this.config.aggregatorContractId,
       this.config.policyEngineContractId,
+      this.config.circuitBreakerContractId,
     ].filter(Boolean);
 
     if (contractIds.length === 0) {

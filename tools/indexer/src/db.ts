@@ -17,7 +17,8 @@
  *                                        DenyAdd | DenyRemove | JurisdictionSet |
  *                                        SignerAdd | SignerRm | ThreshSet | AuthOk |
  *                                        AdminSet | DenylistGateSet |
- *                                        JurisdictionFlagSet | PolicyResult
+ *                                        JurisdictionFlagSet | PolicyResult |
+ *                                        Frozen | Unfrozen
  *   address         TEXT               — primary subject address; also holds the
  *                                        newly configured address for aggregator
  *                                        config events (AdminSet etc.)
@@ -63,6 +64,10 @@
  *   config_key       TEXT NOT NULL     — "admin" | "denylist_gate" | "jurisdiction_flag"
  *   config_address   TEXT NOT NULL     — the currently configured address
  *   PRIMARY KEY (contract_id, config_key)
+ *
+ * circuit_breaker_state — current frozen/unfrozen state per circuit-breaker
+ *   contract_id TEXT PRIMARY KEY
+ *   is_frozen   INTEGER NOT NULL       — 1 = frozen, 0 = unfrozen
  *
  * indexer_state      — internal key/value (stores last_ledger)
  *   key   TEXT PK
@@ -200,6 +205,11 @@ export class ComplianceDb {
         config_key     TEXT NOT NULL,
         config_address TEXT NOT NULL,
         PRIMARY KEY (contract_id, config_key)
+      );
+
+      CREATE TABLE IF NOT EXISTS circuit_breaker_state (
+        contract_id TEXT PRIMARY KEY,
+        is_frozen   INTEGER NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS indexer_state (
@@ -375,6 +385,24 @@ export class ComplianceDb {
       // policy_passed columns). No separate state table — full evaluation
       // history is queryable directly via:
       //   SELECT * FROM events WHERE event_type='PolicyResult' AND contract_id=?
+
+      // ── circuit-breaker state-change events ────────────────────────────────
+      // Upsert so the current freeze state is always queryable:
+      //   SELECT is_frozen FROM circuit_breaker_state WHERE contract_id = ?
+      case "Frozen":
+        this.db.run(
+          `INSERT INTO circuit_breaker_state (contract_id, is_frozen) VALUES (?,1)
+           ON CONFLICT (contract_id) DO UPDATE SET is_frozen = 1`,
+          [e.contractId]
+        );
+        break;
+      case "Unfrozen":
+        this.db.run(
+          `INSERT INTO circuit_breaker_state (contract_id, is_frozen) VALUES (?,0)
+           ON CONFLICT (contract_id) DO UPDATE SET is_frozen = 0`,
+          [e.contractId]
+        );
+        break;
     }
   }
 

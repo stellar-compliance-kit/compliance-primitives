@@ -35,6 +35,11 @@
  *   PolicyResult  topics: [Symbol("PolicyResult"), Bool(passed)]
  *                 data:   Vec[Address(from), Address(to)]
  *
+ * For the two state-change events from circuit-breaker:
+ *
+ *   Frozen    topics: [Symbol("Frozen")]    data: Void
+ *   Unfrozen  topics: [Symbol("Unfrozen")]  data: Void
+ *
  * We parse XDR manually using DataView — no external XDR lib — because the
  * values we need are simple enough and we want zero extra dependencies.
  * If you need full XDR fidelity, swap in @stellar/stellar-base.
@@ -294,6 +299,9 @@ const KNOWN_EVENTS = new Set([
   "JurisdictionFlagSet",
   // policy-engine evaluation event
   "PolicyResult",
+  // circuit-breaker state-change events
+  "Frozen",
+  "Unfrozen",
 ]);
 
 export function decodeEvent(
@@ -487,6 +495,24 @@ export function decodeEvent(
         policyFrom,
         policyTo,
         policyPassed: passedVal.value,
+      };
+    }
+
+    // ── circuit-breaker state-change events ───────────────────────────────────
+    //
+    // Frozen / Unfrozen:
+    //   topics: [Symbol("Frozen")] or [Symbol("Unfrozen")]
+    //   data:   Void
+    //
+    // No address or payload — the event records that the named contract's
+    // freeze state changed. The contract_id column identifies which breaker.
+
+    if (eventType === "Frozen" || eventType === "Unfrozen") {
+      return {
+        ...base,
+        signerAddress: null,
+        newThreshold: null,
+        validCount: null,
       };
     }
 
