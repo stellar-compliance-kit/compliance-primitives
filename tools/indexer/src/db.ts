@@ -75,7 +75,7 @@
  */
 
 import fs from "node:fs";
-import initSqlJs from "sql.js";
+import initSqlJs from "sql.js/dist/sql-asm.js";
 import type { Database, SqlJsStatic } from "sql.js";
 
 export interface RawEvent {
@@ -106,7 +106,11 @@ export interface RawEvent {
 // sql.js is loaded once as a module-level singleton
 let SQL: SqlJsStatic | null = null;
 async function getSql(): Promise<SqlJsStatic> {
-  if (!SQL) SQL = await initSqlJs();
+  if (!SQL) {
+    SQL = await initSqlJs({
+      locateFile: (file: string) => new URL(`../node_modules/sql.js/dist/${file}`, import.meta.url).pathname,
+    });
+  }
   return SQL;
 }
 
@@ -134,6 +138,11 @@ export class ComplianceDb {
   }
 
   private migrate(): void {
+    this.db.run(`CREATE TABLE IF NOT EXISTS schema_migrations (
+      version INTEGER PRIMARY KEY,
+      applied_at TEXT NOT NULL
+    );`);
+    const currentVersion = this.db.exec("SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations")[0]?.values[0]?.[0] as number ?? 0;
     this.db.run(`
       CREATE TABLE IF NOT EXISTS events (
         id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -217,6 +226,14 @@ export class ComplianceDb {
         value TEXT NOT NULL
       );
     `);
+    if (currentVersion < 1) {
+      this.db.run("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)", [1, new Date().toISOString()]);
+    }
+    if (currentVersion < 2) {
+      const columns = this.db.exec("PRAGMA table_info(events)")[0]?.values.map((row) => String(row[1])) ?? [];
+      if (!columns.includes("source_tx_hash")) this.db.run("ALTER TABLE events ADD COLUMN source_tx_hash TEXT");
+      this.db.run("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)", [2, new Date().toISOString()]);
+    }
     this.flush();
   }
 
@@ -422,6 +439,18 @@ export class ComplianceDb {
       [key, value]
     );
     this.flush();
+  }
+
+  getEventCount(contractId?: string): number {
+    const result = contractId
+      ? this.db.exec("SELECT COUNT(*) AS count FROM events WHERE contract_id = ?", [contractId])
+      : this.db.exec("SELECT COUNT(*) AS count FROM events");
+    return Number(result[0]?.values[0]?.[0] ?? 0);
+  }
+
+  isAllowlisted(contractId: string, address: string): boolean {
+    const result = this.db.exec("SELECT 1 FROM allowlist WHERE contract_id = ? AND address = ?", [contractId, address]);
+    return result.length > 0 && result[0].values.length > 0;
   }
 
   getLastIndexedLedger(): number {

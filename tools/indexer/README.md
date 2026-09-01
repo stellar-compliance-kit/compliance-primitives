@@ -34,7 +34,7 @@ cd tools/indexer
 npm install
 
 cp .env.example .env
-# Edit .env — at minimum set one contract ID
+# Edit .env — set RPC_URL, DB_PATH, and at least one contract ID
 ```
 
 Run in dev mode (no compile step, `tsx` runs TypeScript directly):
@@ -129,13 +129,13 @@ The repository’s `prepublishOnly` hook runs typechecking, lint, build, and tes
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RPC_URL` | `https://soroban-testnet.stellar.org` | Soroban RPC endpoint |
+| `RPC_URL` | _(required)_ | Absolute Soroban HTTP(S) RPC endpoint |
 | `NETWORK_PASSPHRASE` | testnet passphrase | Network passphrase |
-| `ALLOWLIST_CONTRACT_ID` | _(empty)_ | Contract ID of your `allowlist-token` deployment |
+| `ALLOWLIST_CONTRACT_ID` | _(optional)_ | Contract ID of your `allowlist-token` deployment; at least one contract ID is required |
 | `DENYLIST_CONTRACT_ID` | _(empty)_ | Contract ID of your `denylist-gate` deployment |
 | `JURISDICTION_CONTRACT_ID` | _(empty)_ | Contract ID of your `jurisdiction-flag` deployment |
-| `DB_PATH` | `compliance.db` | SQLite file path |
-| `POLL_INTERVAL_MS` | `5000` | How often to poll the RPC node |
+| `DB_PATH` | _(required)_ | SQLite file path |
+| `POLL_INTERVAL_MS` | `5000` | How often to poll the RPC node; transient failures use exponential backoff |
 | `START_LEDGER` | `0` | Ledger to start from (0 = auto ~24h ago) |
 
 ---
@@ -199,6 +199,10 @@ SELECT address, code FROM jurisdictions WHERE contract_id = '<your-contract-id>'
 SELECT address FROM jurisdictions WHERE contract_id = '...' AND code = 'US';
 ```
 
+### `schema_migrations` — migration history
+
+The indexer records each applied schema version in this table. Migrations are additive and run at startup, so upgrading the indexer preserves existing events and materialized state.
+
 ### `indexer_state` — internal key/value store
 
 | Column | Type | Description |
@@ -248,7 +252,9 @@ WHERE e.event_type = 'AllowAdd'
 4. Applies events to both the raw `events` log and the materialised state
    tables (`allowlist`, `denylist`, `jurisdictions`) inside a single SQLite
    transaction per poll cycle.
-5. Persists the new `last_ledger` and sleeps until the next poll.
+5. Persists the new `last_ledger` and sleeps until the next poll. Transient HTTP, network, and retryable JSON-RPC failures are retried with bounded exponential backoff before the next scheduled poll.
+
+Run the deterministic integration suite with `npm test`. It starts a local JSON-RPC fixture representing a deployed primitive contract, replays an `AllowAdd` state-changing event, and asserts both the raw event row and materialized allowlist row.
 
 ---
 

@@ -1,17 +1,9 @@
-/**
- * Configuration loaded from environment variables.
- * Copy .env.example to .env and fill in your values.
- */
+/** Runtime configuration for the compliance event indexer. */
 export interface Config {
-  /** Soroban RPC endpoint, e.g. https://soroban-testnet.stellar.org */
   rpcUrl: string;
-  /** Network passphrase */
   networkPassphrase: string;
-  /** Contract ID of the deployed allowlist-token contract (or empty to skip) */
   allowlistContractId: string;
-  /** Contract ID of the deployed denylist-gate contract (or empty to skip) */
   denylistContractId: string;
-  /** Contract ID of the deployed jurisdiction-flag contract (or empty to skip) */
   jurisdictionContractId: string;
   /** Contract ID of the deployed multisig-admin contract (or empty to skip) */
   multisigContractId: string;
@@ -21,58 +13,69 @@ export interface Config {
   policyEngineContractId: string;
   /** Contract ID of the deployed circuit-breaker contract (or empty to skip) */
   circuitBreakerContractId: string;
-  /** Path to the SQLite database file */
   dbPath: string;
-  /** How often to poll for new events, in milliseconds */
   pollIntervalMs: number;
-  /** Ledger sequence to start indexing from (0 = from the earliest available) */
   startLedger: number;
 }
 
-export function loadConfig(): Config {
-  const rpcUrl =
-    process.env.RPC_URL ?? "https://soroban-testnet.stellar.org";
-  const networkPassphrase =
-    process.env.NETWORK_PASSPHRASE ??
-    "Test SDF Network ; September 2015";
+const CONTRACT_ID = /^C[A-Z2-7]{55}$/;
 
-  const allowlistContractId     = process.env.ALLOWLIST_CONTRACT_ID     ?? "";
-  const denylistContractId      = process.env.DENYLIST_CONTRACT_ID      ?? "";
-  const jurisdictionContractId  = process.env.JURISDICTION_CONTRACT_ID  ?? "";
-  const multisigContractId      = process.env.MULTISIG_CONTRACT_ID      ?? "";
-  const aggregatorContractId    = process.env.AGGREGATOR_CONTRACT_ID    ?? "";
-  const policyEngineContractId  = process.env.POLICY_ENGINE_CONTRACT_ID ?? "";
-  const circuitBreakerContractId = process.env.CIRCUIT_BREAKER_CONTRACT_ID ?? "";
+const CONTRACT_ID_ENV_VARS = [
+  "ALLOWLIST_CONTRACT_ID",
+  "DENYLIST_CONTRACT_ID",
+  "JURISDICTION_CONTRACT_ID",
+  "MULTISIG_CONTRACT_ID",
+  "AGGREGATOR_CONTRACT_ID",
+  "POLICY_ENGINE_CONTRACT_ID",
+  "CIRCUIT_BREAKER_CONTRACT_ID",
+] as const;
 
-  if (
-    !allowlistContractId &&
-    !denylistContractId &&
-    !jurisdictionContractId &&
-    !multisigContractId &&
-    !aggregatorContractId &&
-    !policyEngineContractId &&
-    !circuitBreakerContractId
-  ) {
-    console.warn(
-      "Warning: no contract IDs configured — nothing will be indexed.\n" +
-        "Set at least one of ALLOWLIST_CONTRACT_ID, DENYLIST_CONTRACT_ID, " +
-        "JURISDICTION_CONTRACT_ID, MULTISIG_CONTRACT_ID, AGGREGATOR_CONTRACT_ID, " +
-        "POLICY_ENGINE_CONTRACT_ID, CIRCUIT_BREAKER_CONTRACT_ID in your environment."
-    );
+function required(name: string, env: NodeJS.ProcessEnv): string {
+  const value = env[name]?.trim();
+  if (!value) throw new Error(`Invalid indexer configuration: ${name} is required`);
+  return value;
+}
+
+function contractId(name: string, env: NodeJS.ProcessEnv): string {
+  const value = required(name, env);
+  if (!CONTRACT_ID.test(value)) {
+    throw new Error(`Invalid indexer configuration: ${name} must be a valid Soroban contract ID`);
   }
+  return value;
+}
+
+function positiveInteger(name: string, raw: string | undefined, fallback: number, allowZero = false): number {
+  const value = raw === undefined ? fallback : Number(raw);
+  const valid = Number.isInteger(value) && (allowZero ? value >= 0 : value > 0);
+  if (!valid) throw new Error(`Invalid indexer configuration: ${name} must be an ${allowZero ? "integer >= 0" : "integer > 0"}`);
+  return value;
+}
+
+export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+  const rpcUrl = required("RPC_URL", env);
+  try {
+    const parsed = new URL(rpcUrl);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error();
+  } catch {
+    throw new Error("Invalid indexer configuration: RPC_URL must be an absolute HTTP(S) URL");
+  }
+
+  const configuredContracts = CONTRACT_ID_ENV_VARS.filter((name) => env[name]?.trim());
+  if (configuredContracts.length === 0) throw new Error("Invalid indexer configuration: at least one contract ID is required");
+  for (const name of configuredContracts) contractId(name, env);
 
   return {
     rpcUrl,
-    networkPassphrase,
-    allowlistContractId,
-    denylistContractId,
-    jurisdictionContractId,
-    multisigContractId,
-    aggregatorContractId,
-    policyEngineContractId,
-    circuitBreakerContractId,
-    dbPath: process.env.DB_PATH ?? "compliance.db",
-    pollIntervalMs: Number(process.env.POLL_INTERVAL_MS ?? "5000"),
-    startLedger: Number(process.env.START_LEDGER ?? "0"),
+    networkPassphrase: env.NETWORK_PASSPHRASE?.trim() || "Test SDF Network ; September 2015",
+    allowlistContractId: env.ALLOWLIST_CONTRACT_ID?.trim() || "",
+    denylistContractId: env.DENYLIST_CONTRACT_ID?.trim() || "",
+    jurisdictionContractId: env.JURISDICTION_CONTRACT_ID?.trim() || "",
+    multisigContractId: env.MULTISIG_CONTRACT_ID?.trim() || "",
+    aggregatorContractId: env.AGGREGATOR_CONTRACT_ID?.trim() || "",
+    policyEngineContractId: env.POLICY_ENGINE_CONTRACT_ID?.trim() || "",
+    circuitBreakerContractId: env.CIRCUIT_BREAKER_CONTRACT_ID?.trim() || "",
+    dbPath: required("DB_PATH", env),
+    pollIntervalMs: positiveInteger("POLL_INTERVAL_MS", env.POLL_INTERVAL_MS, 5000),
+    startLedger: positiveInteger("START_LEDGER", env.START_LEDGER, 0, true),
   };
 }

@@ -58,6 +58,11 @@ export class Indexer {
     }
   }
 
+  /** Run one poll cycle; useful for deterministic integration tests and operators. */
+  async pollOnce(): Promise<void> {
+    await this.poll();
+  }
+
   private async poll(): Promise<void> {
     const contractIds = [
       this.config.allowlistContractId,
