@@ -10,6 +10,14 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  workspace-members:
+    name: workspace members check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check every contracts/ and examples/ crate is a workspace member
+        run: ./scripts/check-workspace-members.sh
+
   test:
     name: cargo test
     runs-on: ubuntu-latest
@@ -64,6 +72,38 @@ jobs:
       - name: Build contracts to wasm
         run: cargo build --workspace --target wasm32v1-none --release
 
+  wasm-size-budget:
+    name: wasm size budget
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Check wasm binary sizes against budget
+        run: bash scripts/check-wasm-size.sh
+
+  accessibility:
+    name: accessibility audit (web/)
+    runs-on: ubuntu-latest
+    # Non-blocking for now (per the issue that introduced this job): a
+    # failure here is reported but doesn't fail the overall CI run. Once
+    # the audit has been stable for a while, remove continue-on-error to
+    # make it blocking like the other jobs.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install audit tooling (downloads Puppeteer's bundled Chromium)
+        run: npm ci
+      - name: Run axe-core against web/index.html
+        run: node scripts/check-accessibility.mjs
+
   cargo-deny:
     name: cargo deny check
     runs-on: ubuntu-latest
@@ -71,3 +111,93 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run cargo-deny
         uses: EmbarkStudios/cargo-deny-action@v2
+
+  docs-interfaces-diff:
+    name: docs/interfaces diff check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install stellar CLI
+        run: |
+          curl -s https://raw.githubusercontent.com/stellar/stellar-cli/master/install.sh | bash
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Regenerate interface docs
+        run: ./scripts/regenerate-docs.sh
+      - name: Check for differences
+        run: |
+          if git diff --exit-code docs/interfaces/ > /dev/null; then
+            echo "✓ docs/interfaces is up to date"
+          else
+            echo "✗ docs/interfaces is out of date. Run ./scripts/regenerate-docs.sh and commit the changes."
+            git diff docs/interfaces/
+            exit 1
+          fi
+
+  examples-test:
+    name: test all examples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Enumerate and test examples
+        run: |
+          set -e
+          EXAMPLES_DIR="examples"
+          FAILED_CRATES=()
+
+          echo "Testing all example crates..."
+          for dir in "$EXAMPLES_DIR"/*; do
+            if [ -d "$dir" ]; then
+              CRATE_NAME=$(basename "$dir")
+              if [ -f "$dir/Cargo.toml" ]; then
+                echo "Testing $CRATE_NAME..."
+                if ! cargo test -p "$CRATE_NAME" --verbose; then
+                  FAILED_CRATES+=("$CRATE_NAME")
+                fi
+              else
+                echo "ERROR: Directory $dir exists but has no Cargo.toml"
+                exit 1
+              fi
+            fi
+          done
+
+          if [ ${#FAILED_CRATES[@]} -ne 0 ]; then
+            echo "ERROR: The following example crates failed tests:"
+            printf '  - %s\n' "${FAILED_CRATES[@]}"
+            exit 1
+          fi
+
+          echo "All example crates passed tests."
+
+  changelog-version-sync:
+    name: changelog version sync check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Check CHANGELOG.md and version are in sync
+        run: ./scripts/check-changelog.sh
+
+  semver-checks:
+    name: cargo semver-checks
+    runs-on: ubuntu-latest
+    # Check for accidental breaking API changes in public crates.
+    # Currently scopes to compliance-pausable (a publishable shared crate).
+    # Add --package flags for additional crates as they become public.
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Install cargo-semver-checks
+        run: cargo install cargo-semver-checks
+      - name: Check semver compliance for compliance-pausable
+        run: cargo semver-checks check-release --package compliance-pausable

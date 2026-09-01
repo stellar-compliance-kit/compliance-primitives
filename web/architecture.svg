@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 700" role="img" aria-labelledby="title desc">
+  <title id="title">Compliance primitives composition graph</title>
+  <desc id="desc">Nine Soroban contracts connected by composition and administrative relationships.</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#0060df"/></marker></defs>
+  <rect width="1200" height="700" rx="24" fill="#f6f7f9"/>
+  <g font-family="system-ui, sans-serif" font-size="18" text-anchor="middle" fill="#1a1d23">
+    <g fill="none" stroke="#0060df" stroke-width="3" marker-end="url(#arrow)" opacity=".8">
+      <path d="M200 110 C320 110 400 170 520 220"/><path d="M680 220 C800 170 880 110 1000 110"/>
+      <path d="M680 250 L1000 250"/><path d="M680 280 C800 330 880 390 1000 390"/>
+      <path d="M680 310 C800 470 880 520 1000 530"/><path d="M200 540 C350 540 420 430 520 330"/>
+      <path d="M200 600 C350 600 420 450 520 350"/><path d="M200 660 C350 660 430 470 520 370"/>
+      <path d="M1000 610 C900 580 820 470 680 350"/>
+      <path d="M1000 670 C900 650 820 500 680 370"/>
+    </g>
+    <g stroke="#c9d1dc" stroke-width="2">
+      <rect x="70" y="70" width="260" height="80" rx="14" fill="#eaf1fd"/><rect x="470" y="190" width="260" height="100" rx="14" fill="#dceaff"/>
+      <rect x="870" y="70" width="260" height="80" rx="14" fill="#eaf1fd"/><rect x="870" y="210" width="260" height="80" rx="14" fill="#eaf1fd"/><rect x="870" y="350" width="260" height="80" rx="14" fill="#eaf1fd"/><rect x="870" y="490" width="260" height="80" rx="14" fill="#eaf1fd"/>
+      <rect x="70" y="500" width="260" height="80" rx="14" fill="#fff7df"/><rect x="70" y="590" width="260" height="80" rx="14" fill="#fff7df"/><rect x="70" y="410" width="260" height="80" rx="14" fill="#fff7df"/>
+    </g>
+    <text x="200" y="118">allowlist-token</text><text x="600" y="232">compliance-aggregator</text><text x="600" y="258" font-size="14">application composition hub</text>
+    <text x="1000" y="118">denylist-gate</text><text x="1000" y="258">jurisdiction-flag</text><text x="1000" y="398">policy-engine</text><text x="1000" y="538">audit-log</text>
+    <text x="200" y="458">multisig-admin</text><text x="200" y="548">pausable</text><text x="200" y="638">circuit-breaker</text>
+  </g>
+  <g font-family="system-ui, sans-serif" font-size="14" fill="#5b616e"><text x="40" y="35">Blue arrows: contract composition and checks · Gold nodes: operational controls</text></g>
+</svg>

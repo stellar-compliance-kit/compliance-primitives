@@ -42,13 +42,32 @@
  *   code        TEXT NOT NULL
  *   PRIMARY KEY (contract_id, address)
  *
+ * multisig_signers     — current signer set per multisig-admin contract
+ *   contract_id TEXT NOT NULL
+ *   address     TEXT NOT NULL
+ *   PRIMARY KEY (contract_id, address)
+ *
+ * multisig_threshold   — current threshold per multisig-admin contract
+ *   contract_id TEXT PK
+ *   threshold   INTEGER NOT NULL
+ *
+ * aggregator_config  — current gate/flag addresses per aggregator contract
+ *   contract_id      TEXT NOT NULL     — the aggregator contract
+ *   config_key       TEXT NOT NULL     — "admin" | "denylist_gate" | "jurisdiction_flag"
+ *   config_address   TEXT NOT NULL     — the currently configured address
+ *   PRIMARY KEY (contract_id, config_key)
+ *
+ * circuit_breaker_state — current frozen/unfrozen state per circuit-breaker
+ *   contract_id TEXT PRIMARY KEY
+ *   is_frozen   INTEGER NOT NULL       — 1 = frozen, 0 = unfrozen
+ *
  * indexer_state      — internal key/value (stores last_ledger)
  *   key   TEXT PK
  *   value TEXT NOT NULL
  */
 
 import fs from "node:fs";
-import initSqlJs from "sql.js";
+import initSqlJs from "sql.js/dist/sql-asm.js";
 import type { Database, SqlJsStatic } from "sql.js";
 
 export interface RawEvent {
@@ -73,7 +92,11 @@ export interface RawEvent {
 // sql.js is loaded once as a module-level singleton
 let SQL: SqlJsStatic | null = null;
 async function getSql(): Promise<SqlJsStatic> {
-  if (!SQL) SQL = await initSqlJs();
+  if (!SQL) {
+    SQL = await initSqlJs({
+      locateFile: (file: string) => new URL(`../node_modules/sql.js/dist/${file}`, import.meta.url).pathname,
+    });
+  }
   return SQL;
 }
 
@@ -101,6 +124,11 @@ export class ComplianceDb {
   }
 
   private migrate(): void {
+    this.db.run(`CREATE TABLE IF NOT EXISTS schema_migrations (
+      version INTEGER PRIMARY KEY,
+      applied_at TEXT NOT NULL
+    );`);
+    const currentVersion = this.db.exec("SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations")[0]?.values[0]?.[0] as number ?? 0;
     this.db.run(`
       CREATE TABLE IF NOT EXISTS events (
         id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -127,6 +155,12 @@ export class ComplianceDb {
         ON events (event_type);
       CREATE INDEX IF NOT EXISTS idx_events_ledger
         ON events (ledger_sequence);
+      CREATE INDEX IF NOT EXISTS idx_events_signer
+        ON events (signer_address);
+      CREATE INDEX IF NOT EXISTS idx_events_policy_from
+        ON events (policy_from);
+      CREATE INDEX IF NOT EXISTS idx_events_policy_to
+        ON events (policy_to);
 
       CREATE TABLE IF NOT EXISTS allowlist (
         contract_id TEXT NOT NULL,
@@ -170,6 +204,14 @@ export class ComplianceDb {
         value TEXT NOT NULL
       );
     `);
+    if (currentVersion < 1) {
+      this.db.run("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)", [1, new Date().toISOString()]);
+    }
+    if (currentVersion < 2) {
+      const columns = this.db.exec("PRAGMA table_info(events)")[0]?.values.map((row) => String(row[1])) ?? [];
+      if (!columns.includes("source_tx_hash")) this.db.run("ALTER TABLE events ADD COLUMN source_tx_hash TEXT");
+      this.db.run("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)", [2, new Date().toISOString()]);
+    }
     this.flush();
   }
 
@@ -306,6 +348,18 @@ export class ComplianceDb {
       [key, value]
     );
     this.flush();
+  }
+
+  getEventCount(contractId?: string): number {
+    const result = contractId
+      ? this.db.exec("SELECT COUNT(*) AS count FROM events WHERE contract_id = ?", [contractId])
+      : this.db.exec("SELECT COUNT(*) AS count FROM events");
+    return Number(result[0]?.values[0]?.[0] ?? 0);
+  }
+
+  isAllowlisted(contractId: string, address: string): boolean {
+    const result = this.db.exec("SELECT 1 FROM allowlist WHERE contract_id = ? AND address = ?", [contractId, address]);
+    return result.length > 0 && result[0].values.length > 0;
   }
 
   getLastIndexedLedger(): number {

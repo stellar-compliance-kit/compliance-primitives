@@ -146,6 +146,7 @@ class XdrReader {
 
 type ScVal =
   | { type: "Void" }
+  | { type: "Bool"; value: boolean }
   | { type: "Symbol"; value: string }
   | { type: "String"; value: string }
   | { type: "Address"; value: string }
@@ -158,6 +159,9 @@ type ScVal =
 function decodeScVal(r: XdrReader): ScVal {
   const disc = r.readU32();
   switch (disc) {
+    case ScType.Bool:
+      return { type: "Bool", value: r.readU32() !== 0 };
+
     case ScType.Void:
       return { type: "Void" };
 
@@ -290,12 +294,27 @@ function base32Encode(data: Uint8Array): string {
 // ─── Event decoding ───────────────────────────────────────────────────────────
 
 const KNOWN_EVENTS = new Set([
+  // compliance-primitives events
   "AllowAdd",
   "AllowRemove",
   "Blocked",
   "DenyAdd",
   "DenyRemove",
   "JurisdictionSet",
+  // multisig-admin events
+  "SignerAdd",
+  "SignerRm",
+  "ThreshSet",
+  "AuthOk",
+  // compliance-aggregator configuration events
+  "AdminSet",
+  "DenylistGateSet",
+  "JurisdictionFlagSet",
+  // policy-engine evaluation event
+  "PolicyResult",
+  // circuit-breaker state-change events
+  "Frozen",
+  "Unfrozen",
 ]);
 
 export function decodeEvent(
@@ -303,7 +322,7 @@ export function decodeEvent(
 ): RawEvent | null {
   try {
     // topics is an array of base64 XDR ScVal strings
-    if (!raw.topic || raw.topic.length < 2) return null;
+    if (!raw.topic || raw.topic.length < 1) return null;
 
     const topics = raw.topic.map((t) => decodeScVal(new XdrReader(base64ToBytes(t))));
 
@@ -400,7 +419,128 @@ export function decodeEvent(
       detail: null,
       rawTopics: JSON.stringify(raw.topic),
       rawData: raw.value ?? "",
-    };
+    } as const;
+
+    if (eventType === "SignerAdd" || eventType === "SignerRm") {
+      // topics: [Symbol, Address(signer)]
+      if (raw.topic.length < 2) return null;
+      const signerVal = topics[1];
+      if (signerVal.type !== "Address") return null;
+      return {
+        ...base,
+        signerAddress: signerVal.value,
+        newThreshold: null,
+        validCount: null,
+      };
+    }
+
+    if (eventType === "ThreshSet") {
+      // topics: [Symbol]  data: U32(threshold)
+      if (dataVal.type !== "U32") return null;
+      return {
+        ...base,
+        signerAddress: null,
+        newThreshold: dataVal.value,
+        validCount: null,
+      };
+    }
+
+    if (eventType === "AuthOk") {
+      // topics: [Symbol]  data: Vec[U32(valid_count), U32(threshold)]
+      // The Soroban SDK encodes a Rust tuple (u32, u32) as a two-element ScVec.
+      let validCount: number | null = null;
+      let newThreshold: number | null = null;
+      if (dataVal.type === "Vec" && dataVal.value.length === 2) {
+        const v0 = dataVal.value[0];
+        const v1 = dataVal.value[1];
+        if (v0.type === "U32") validCount = v0.value;
+        if (v1.type === "U32") newThreshold = v1.value;
+      }
+      return {
+        ...base,
+        signerAddress: null,
+        newThreshold,
+        validCount,
+      };
+    }
+
+    // ── compliance-aggregator configuration events ────────────────────────────
+    //
+    // AdminSet, DenylistGateSet, JurisdictionFlagSet all share the same shape:
+    //   topics: [Symbol(name), Address(configured_contract_or_admin)]
+    //   data:   Void
+
+    if (
+      eventType === "AdminSet" ||
+      eventType === "DenylistGateSet" ||
+      eventType === "JurisdictionFlagSet"
+    ) {
+      if (raw.topic.length < 2) return null;
+      const addrVal = topics[1];
+      if (addrVal.type !== "Address") return null;
+
+      return {
+        ...base,
+        // Reuse `address` to hold the newly configured admin/gate/flag address
+        address: addrVal.value,
+        signerAddress: null,
+        newThreshold: null,
+        validCount: null,
+      };
+    }
+
+    // ── policy-engine evaluation event ───────────────────────────────────────
+    //
+    // PolicyResult:
+    //   topics: [Symbol("PolicyResult"), Bool(passed)]
+    //   data:   Vec[Address(from), Address(to)]
+
+    if (eventType === "PolicyResult") {
+      if (raw.topic.length < 2) return null;
+      const passedVal = topics[1];
+      if (passedVal.type !== "Bool") return null;
+
+      let policyFrom: string | null = null;
+      let policyTo: string | null = null;
+
+      // data is Vec[Address(from), Address(to)]
+      if (dataVal.type === "Vec" && dataVal.value.length >= 2) {
+        const fromVal = dataVal.value[0];
+        const toVal = dataVal.value[1];
+        if (fromVal.type === "Address") policyFrom = fromVal.value;
+        if (toVal.type === "Address") policyTo = toVal.value;
+      }
+
+      return {
+        ...base,
+        signerAddress: null,
+        newThreshold: null,
+        validCount: null,
+        policyFrom,
+        policyTo,
+        policyPassed: passedVal.value,
+      };
+    }
+
+    // ── circuit-breaker state-change events ───────────────────────────────────
+    //
+    // Frozen / Unfrozen:
+    //   topics: [Symbol("Frozen")] or [Symbol("Unfrozen")]
+    //   data:   Void
+    //
+    // No address or payload — the event records that the named contract's
+    // freeze state changed. The contract_id column identifies which breaker.
+
+    if (eventType === "Frozen" || eventType === "Unfrozen") {
+      return {
+        ...base,
+        signerAddress: null,
+        newThreshold: null,
+        validCount: null,
+      };
+    }
+
+    return null;
   } catch (err) {
     console.error(`Failed to decode event from contract ${raw.contractId}:`, err);
     return null;

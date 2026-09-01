@@ -1,27 +1,24 @@
 # jurisdiction-denylist-consumer
 
-Reference example contract demonstrating composition of both `denylist-gate` and `jurisdiction-flag` in a consuming token contract's transfer function.
+Demonstrates combining `jurisdiction-flag` and `denylist-gate` in a single transfer check.
 
-## Overview
+## Pattern
 
-This contract demonstrates how an issuer can compose multiple compliance primitives together prior to executing balance mutations.
+This example shows how to compose two compliance primitives in sequence:
 
-### Check Order
+1. Check jurisdiction: both addresses must have permitted jurisdiction codes
+2. Check denylist: neither address can be on the denylist
 
-During a `transfer(from, to, amount)` invocation, the checks are executed in the following strict order:
+Both checks must pass for the transfer to succeed. This demonstrates a common compliance pattern where multiple independent checks are required.
 
-1. **Denylist Check (`denylist-gate`)**:
-   Calls `check()` for both `from` (sender) and `to` (recipient).
-   - If either address is denylisted, the contract immediately aborts with `Error::DeniedByGate`.
+## Primitives composed
 
-2. **Jurisdiction Flag Check (`jurisdiction-flag`)**:
-   Calls `is_permitted_jurisdiction()` for `from` (sender) against the contract's configured `allowed_jurisdictions` list.
-   - If the sender's address has no jurisdiction set or its jurisdiction code is not in the allowed list, the contract aborts with `Error::DeniedByJurisdiction`.
+- `jurisdiction-flag` — jurisdiction-based access control
+- `denylist-gate` — address denylist enforcement
 
-3. **Balance Check & Mutation**:
-   - Verifies `from` has sufficient balance (`Error::InsufficientBalance`).
-   - Updates `from` and `to` balances upon success.
+## Build & test
 
-## Trait-based Client Generation
-
-To avoid link-time WASM symbol collisions, this contract does not include direct crate dependencies for `denylist-gate` or `jurisdiction-flag` in its core build dependencies. Instead, it uses `#[contractclient]` trait declarations (`GateClient` and `JurisdictionFlagClient`) to interact with deployed instances via cross-contract calls.
+```sh
+cargo test -p jurisdiction-denylist-consumer
+cargo build -p jurisdiction-denylist-consumer --target wasm32v1-none --release
+```
