@@ -15,22 +15,14 @@
  *   contract_id     TEXT NOT NULL
  *   event_type      TEXT NOT NULL      — AllowAdd | AllowRemove | Blocked |
  *                                        DenyAdd | DenyRemove | JurisdictionSet |
- *                                        SignerAdd | SignerRm | ThreshSet | AuthOk |
- *                                        AdminSet | DenylistGateSet |
- *                                        JurisdictionFlagSet | PolicyResult |
- *                                        Frozen | Unfrozen
- *   address         TEXT               — primary subject address; also holds the
- *                                        newly configured address for aggregator
- *                                        config events (AdminSet etc.)
+ *                                        ComplianceEvent
+ *   address         TEXT               — primary subject address
  *   address_to      TEXT               — secondary address (Blocked only)
  *   amount          TEXT               — i128 as decimal string (Blocked only)
  *   jurisdiction    TEXT               — ISO code (JurisdictionSet only)
- *   signer_address  TEXT               — affected signer (SignerAdd/SignerRm only)
- *   new_threshold   INTEGER            — new threshold value (ThreshSet only)
- *   valid_count     INTEGER            — valid signature count (AuthOk only)
- *   policy_from     TEXT               — sender address (PolicyResult only)
- *   policy_to       TEXT               — receiver address (PolicyResult only)
- *   policy_passed   INTEGER            — 1=pass, 0=fail, NULL otherwise
+ *   kind            TEXT               — audit-log event kind (ComplianceEvent only)
+ *   source          TEXT               — audit-log source address (ComplianceEvent only)
+ *   detail          TEXT               — audit-log detail string (ComplianceEvent only)
  *   raw_topics      TEXT NOT NULL      — JSON array of base64-XDR topic strings
  *   raw_data        TEXT NOT NULL      — base64-XDR data value
  *
@@ -87,18 +79,12 @@ export interface RawEvent {
   addressTo: string | null;
   amount: string | null;
   jurisdiction: string | null;
-  /** For multisig SignerAdd / SignerRm: the signer address affected. */
-  signerAddress: string | null;
-  /** For multisig ThreshSet: the new threshold value. */
-  newThreshold: number | null;
-  /** For multisig AuthOk: the number of valid signatures counted. */
-  validCount: number | null;
-  /** Sender address for PolicyResult events. */
-  policyFrom: string | null;
-  /** Receiver address for PolicyResult events. */
-  policyTo: string | null;
-  /** Pass/fail result for PolicyResult events; null for all other event types. */
-  policyPassed: boolean | null;
+  /** Populated for ComplianceEvent: the kind symbol value (e.g. "deny_add") */
+  kind: string | null;
+  /** Populated for ComplianceEvent: the source address that called record() */
+  source: string | null;
+  /** Populated for ComplianceEvent: the free-form detail string */
+  detail: string | null;
   rawTopics: string;
   rawData: string;
 }
@@ -154,12 +140,9 @@ export class ComplianceDb {
         address_to      TEXT,
         amount          TEXT,
         jurisdiction    TEXT,
-        signer_address  TEXT,
-        new_threshold   INTEGER,
-        valid_count     INTEGER,
-        policy_from     TEXT,
-        policy_to       TEXT,
-        policy_passed   INTEGER,
+        kind            TEXT,
+        source          TEXT,
+        detail          TEXT,
         raw_topics      TEXT    NOT NULL,
         raw_data        TEXT    NOT NULL
       );
@@ -198,28 +181,23 @@ export class ComplianceDb {
         PRIMARY KEY (contract_id, address)
       );
 
-      CREATE TABLE IF NOT EXISTS multisig_signers (
-        contract_id TEXT NOT NULL,
-        address     TEXT NOT NULL,
-        PRIMARY KEY (contract_id, address)
+      CREATE TABLE IF NOT EXISTS audit_log (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        contract_id TEXT    NOT NULL,
+        ledger      INTEGER NOT NULL,
+        timestamp   INTEGER,
+        kind        TEXT    NOT NULL,
+        subject     TEXT    NOT NULL,
+        source      TEXT    NOT NULL,
+        detail      TEXT    NOT NULL
       );
 
-      CREATE TABLE IF NOT EXISTS multisig_threshold (
-        contract_id TEXT PRIMARY KEY,
-        threshold   INTEGER NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS aggregator_config (
-        contract_id    TEXT NOT NULL,
-        config_key     TEXT NOT NULL,
-        config_address TEXT NOT NULL,
-        PRIMARY KEY (contract_id, config_key)
-      );
-
-      CREATE TABLE IF NOT EXISTS circuit_breaker_state (
-        contract_id TEXT PRIMARY KEY,
-        is_frozen   INTEGER NOT NULL
-      );
+      CREATE INDEX IF NOT EXISTS idx_audit_log_contract
+        ON audit_log (contract_id);
+      CREATE INDEX IF NOT EXISTS idx_audit_log_subject
+        ON audit_log (subject);
+      CREATE INDEX IF NOT EXISTS idx_audit_log_kind
+        ON audit_log (kind);
 
       CREATE TABLE IF NOT EXISTS indexer_state (
         key   TEXT PRIMARY KEY,
@@ -264,10 +242,9 @@ export class ComplianceDb {
       `INSERT INTO events
          (ledger_sequence, timestamp, contract_id, event_type,
           address, address_to, amount, jurisdiction,
-          signer_address, new_threshold, valid_count,
-          policy_from, policy_to, policy_passed,
+          kind, source, detail,
           raw_topics, raw_data)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         e.ledgerSequence,
         e.timestamp,
@@ -277,12 +254,9 @@ export class ComplianceDb {
         e.addressTo,
         e.amount,
         e.jurisdiction,
-        e.signerAddress,
-        e.newThreshold,
-        e.validCount,
-        e.policyFrom,
-        e.policyTo,
-        e.policyPassed === null ? null : e.policyPassed ? 1 : 0,
+        e.kind,
+        e.source,
+        e.detail,
         e.rawTopics,
         e.rawData,
       ]
@@ -332,93 +306,28 @@ export class ComplianceDb {
           );
         }
         break;
-      // Blocked: recorded in events log only, no state change
-
-      case "SignerAdd":
-        if (e.signerAddress) {
+      case "Blocked":
+        // Recorded in events log only; no materialised-state change.
+        break;
+      case "ComplianceEvent":
+        // Append a row to the audit_log materialised table so callers can
+        // query the full audit trail without scanning the raw events table.
+        if (e.kind && e.address && e.source != null) {
           this.db.run(
-            "INSERT OR IGNORE INTO multisig_signers (contract_id, address) VALUES (?,?)",
-            [e.contractId, e.signerAddress]
+            `INSERT INTO audit_log
+               (contract_id, ledger, timestamp, kind, subject, source, detail)
+             VALUES (?,?,?,?,?,?,?)`,
+            [
+              e.contractId,
+              e.ledgerSequence,
+              e.timestamp,
+              e.kind,
+              e.address,   // subject
+              e.source,
+              e.detail ?? "",
+            ]
           );
         }
-        break;
-
-      case "SignerRm":
-        if (e.signerAddress) {
-          this.db.run(
-            "DELETE FROM multisig_signers WHERE contract_id = ? AND address = ?",
-            [e.contractId, e.signerAddress]
-          );
-        }
-        break;
-
-      case "ThreshSet":
-        if (e.newThreshold !== null) {
-          this.db.run(
-            `INSERT INTO multisig_threshold (contract_id, threshold) VALUES (?,?)
-             ON CONFLICT (contract_id) DO UPDATE SET threshold = excluded.threshold`,
-            [e.contractId, e.newThreshold]
-          );
-        }
-        break;
-
-      // AuthOk: recorded in events log only (valid_count + new_threshold columns),
-      // no separate state table — governance history is queryable via the events log.
-
-      // ── compliance-aggregator configuration events ──────────────────────────
-      // Upsert into aggregator_config so the current wiring is always queryable.
-
-      case "AdminSet":
-        if (e.address) {
-          this.db.run(
-            `INSERT INTO aggregator_config (contract_id, config_key, config_address) VALUES (?,?,?)
-             ON CONFLICT (contract_id, config_key) DO UPDATE SET config_address = excluded.config_address`,
-            [e.contractId, "admin", e.address]
-          );
-        }
-        break;
-
-      case "DenylistGateSet":
-        if (e.address) {
-          this.db.run(
-            `INSERT INTO aggregator_config (contract_id, config_key, config_address) VALUES (?,?,?)
-             ON CONFLICT (contract_id, config_key) DO UPDATE SET config_address = excluded.config_address`,
-            [e.contractId, "denylist_gate", e.address]
-          );
-        }
-        break;
-
-      case "JurisdictionFlagSet":
-        if (e.address) {
-          this.db.run(
-            `INSERT INTO aggregator_config (contract_id, config_key, config_address) VALUES (?,?,?)
-             ON CONFLICT (contract_id, config_key) DO UPDATE SET config_address = excluded.config_address`,
-            [e.contractId, "jurisdiction_flag", e.address]
-          );
-        }
-        break;
-
-      // PolicyResult: recorded in events log only (policy_from, policy_to,
-      // policy_passed columns). No separate state table — full evaluation
-      // history is queryable directly via:
-      //   SELECT * FROM events WHERE event_type='PolicyResult' AND contract_id=?
-
-      // ── circuit-breaker state-change events ────────────────────────────────
-      // Upsert so the current freeze state is always queryable:
-      //   SELECT is_frozen FROM circuit_breaker_state WHERE contract_id = ?
-      case "Frozen":
-        this.db.run(
-          `INSERT INTO circuit_breaker_state (contract_id, is_frozen) VALUES (?,1)
-           ON CONFLICT (contract_id) DO UPDATE SET is_frozen = 1`,
-          [e.contractId]
-        );
-        break;
-      case "Unfrozen":
-        this.db.run(
-          `INSERT INTO circuit_breaker_state (contract_id, is_frozen) VALUES (?,0)
-           ON CONFLICT (contract_id) DO UPDATE SET is_frozen = 0`,
-          [e.contractId]
-        );
         break;
     }
   }

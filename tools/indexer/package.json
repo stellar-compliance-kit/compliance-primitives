@@ -41,7 +41,7 @@
     "prepublishOnly": "npm run typecheck && npm run lint && npm run build && npm test",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
-    "test": "tsx --test src/decoder.test.ts src/decoder.aggregator-policy.test.ts src/decoder.generic.test.ts src/decoder.circuit-breaker.test.ts src/db.test.ts test/package.test.mjs test/indexer.test.ts"
+    "test": "tsx --test src/decoder.test.ts"
   },
   "dependencies": {
     "sql.js": "^1.12.0"

@@ -1,260 +1,263 @@
 /**
- * Unit tests for decoder.ts — multisig-admin event decoding.
+ * Unit tests for decoder.ts — ComplianceEvent (audit-log) decoding.
  *
- * Fixtures are hand-crafted XDR bytes encoded as base64, produced to match
- * the exact wire format the `multisig-admin` contract emits:
+ * Run with:
+ *   npx tsx --test src/decoder.test.ts
  *
- *   SignerAdd   topics: [Symbol("SignerAdd"), Address]  data: Void
- *   SignerRm    topics: [Symbol("SignerRm"),  Address]  data: Void
- *   ThreshSet   topics: [Symbol("ThreshSet")]           data: U32(threshold)
- *   AuthOk      topics: [Symbol("AuthOk")]              data: Vec[U32(valid), U32(threshold)]
+ * We construct minimal hand-crafted XDR byte sequences for each ScVal, then
+ * base64-encode them to match the format the Soroban RPC returns.  No
+ * external XDR library is required; the helpers here mirror the write side of
+ * the XdrReader used in production.
  *
- * The XDR is assembled using the same encoding rules the XdrReader in
- * decoder.ts expects, so these tests also implicitly validate that the
- * hand-rolled reader handles all four shapes correctly.
+ * XDR layout recap for the values we encode:
+ *
+ *   ScVal::Symbol(s)        → [u32 disc=15] [u32 len] [bytes] [pad to 4]
+ *   ScVal::String(s)        → [u32 disc=14] [u32 len] [bytes] [pad to 4]
+ *   ScVal::Address(Account) → [u32 disc=18] [u32 addrType=0]
+ *                               [u32 pubkeyType=0] [32 bytes]
+ *   ScVal::Map              → [u32 disc=17] [u32 some=1] [u32 count]
+ *                               for each entry: key ScVal, value ScVal
+ *   ScVal::Void             → [u32 disc=1]
+ *
+ * All multi-byte integers are big-endian (XDR spec §3.1).
+ * Variable-length opaque data is padded to a 4-byte boundary.
  */
 
+import { test } from "node:test";
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
 import { decodeEvent } from "./decoder.js";
 import type { RawSorobanEvent } from "./rpc.js";
 
-// ─── XDR fixture helpers ──────────────────────────────────────────────────────
+// ─── XDR write helpers ────────────────────────────────────────────────────────
 
-function u32Bytes(n: number): Uint8Array {
-  const b = new Uint8Array(4);
-  new DataView(b.buffer).setUint32(0, n, false);
-  return b;
+function u32(n: number): number[] {
+  return [(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff];
 }
 
-function xdrString(s: string): Uint8Array {
-  const enc = new TextEncoder().encode(s);
-  const pad = (4 - (enc.length % 4)) % 4;
-  const out = new Uint8Array(4 + enc.length + pad);
-  new DataView(out.buffer).setUint32(0, enc.length, false);
-  out.set(enc, 4);
-  return out;
+function varBytes(data: number[]): number[] {
+  const pad = (4 - (data.length % 4)) % 4;
+  return [...u32(data.length), ...data, ...new Array(pad).fill(0)];
 }
 
-function concat(...parts: Uint8Array[]): Uint8Array {
-  const total = parts.reduce((n, a) => n + a.length, 0);
-  const out = new Uint8Array(total);
-  let pos = 0;
-  for (const p of parts) {
-    out.set(p, pos);
-    pos += p.length;
-  }
-  return out;
+function xdrStringLike(disc: number, s: string): number[] {
+  const encoded = Array.from(new TextEncoder().encode(s));
+  return [...u32(disc), ...varBytes(encoded)];
 }
 
-function toB64(bytes: Uint8Array): string {
-  return Buffer.from(bytes).toString("base64");
+/** XDR-encode ScVal::Symbol */
+function xdrSymbol(s: string): number[] {
+  return xdrStringLike(15, s);
 }
 
-// ScType discriminants
-const SC_VOID    = 1;
-const SC_U32     = 3;
-const SC_SYMBOL  = 15;
-const SC_VEC     = 16;
-const SC_ADDRESS = 18;
-const SC_ACCOUNT = 0; // ScAddressType::Account
-const SC_ED25519 = 0; // PublicKey type discriminant
-
-function scVoid(): Uint8Array {
-  return u32Bytes(SC_VOID);
-}
-
-function scSymbol(s: string): Uint8Array {
-  return concat(u32Bytes(SC_SYMBOL), xdrString(s));
-}
-
-function scU32(n: number): Uint8Array {
-  return concat(u32Bytes(SC_U32), u32Bytes(n));
-}
-
-/** Build a Vec ScVal containing the given pre-encoded ScVal items. */
-function scVec(items: Uint8Array[]): Uint8Array {
-  // XDR optional-vec encoding: present=1, then len, then items
-  const parts: Uint8Array[] = [u32Bytes(SC_VEC), u32Bytes(1), u32Bytes(items.length)];
-  for (const item of items) parts.push(item);
-  return concat(...parts);
+/** XDR-encode ScVal::String */
+function xdrStr(s: string): number[] {
+  return xdrStringLike(14, s);
 }
 
 /**
- * Build an Account Address ScVal with a 32-byte key filled with `fill`.
- * Encoding: [SC_ADDRESS=18][SC_ACCOUNT=0][ED25519_type=0][32 bytes]
+ * XDR-encode ScVal::Address for an Account (Ed25519 public key).
+ * @param pubkey 32-byte Ed25519 public key
  */
-function scAccountAddress(fill: number): Uint8Array {
-  const key = new Uint8Array(32).fill(fill);
-  return concat(u32Bytes(SC_ADDRESS), u32Bytes(SC_ACCOUNT), u32Bytes(SC_ED25519), key);
+function xdrAccountAddress(pubkey: Uint8Array): number[] {
+  if (pubkey.length !== 32) throw new Error("pubkey must be 32 bytes");
+  return [
+    ...u32(18), // ScVal::Address discriminant
+    ...u32(0),  // ScAddressType::Account
+    ...u32(0),  // PublicKey::ED25519 discriminant
+    ...Array.from(pubkey),
+  ];
 }
 
-// ─── Expected decoded G-addresses ─────────────────────────────────────────────
-// These were computed by running encodeG() from decoder.ts on the same keys.
-const ADDR_AA = "GCVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVH7N";
-const ADDR_BB = "GC53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53XUGE";
+/**
+ * XDR-encode ScVal::Map.
+ * @param entries array of pre-encoded [key, value] byte sequences concatenated
+ */
+function xdrMap(entries: number[][]): number[] {
+  return [
+    ...u32(17), // ScVal::Map discriminant
+    ...u32(1),  // Some (non-null map)
+    ...u32(entries.length),
+    ...entries.flat(),
+  ];
+}
 
-// ─── Shared raw event skeleton ────────────────────────────────────────────────
-function makeRaw(
-  topic: string[],
-  value: string,
-  overrides: Partial<RawSorobanEvent> = {}
-): RawSorobanEvent {
+function bytesToBase64(bytes: number[]): string {
+  return btoa(String.fromCharCode(...bytes));
+}
+
+// ─── Test data ────────────────────────────────────────────────────────────────
+
+// Deterministic 32-byte "addresses" for reproducible tests.
+const SUBJECT_KEY = new Uint8Array(32).fill(0xab);
+const SOURCE_KEY = new Uint8Array(32).fill(0xcd);
+
+const CONTRACT_ID = "CCOMPLIANCE0000000000000000000000000000000000000000000001";
+const KIND = "deny_add";
+const DETAIL = "added by compliance officer";
+
+// ─── Fixture builder ──────────────────────────────────────────────────────────
+
+function buildComplianceEventRaw(opts: {
+  kind?: string;
+  detail?: string;
+  subjectKey?: Uint8Array;
+  sourceKey?: Uint8Array;
+  ledger?: number;
+  ledgerClosedAt?: string;
+}): RawSorobanEvent {
+  const {
+    kind = KIND,
+    detail = DETAIL,
+    subjectKey = SUBJECT_KEY,
+    sourceKey = SOURCE_KEY,
+    ledger = 1234,
+    ledgerClosedAt = "2025-01-01T00:00:00Z",
+  } = opts;
+
+  const topic0 = bytesToBase64(xdrSymbol(kind));
+  const topic1 = bytesToBase64(xdrAccountAddress(subjectKey));
+
+  // data = Map { "source": Address(sourceKey), "detail": String(detail) }
+  const sourceEntry = [...xdrSymbol("source"), ...xdrAccountAddress(sourceKey)];
+  const detailEntry = [...xdrSymbol("detail"), ...xdrStr(detail)];
+  const dataB64 = bytesToBase64(xdrMap([sourceEntry, detailEntry]));
+
   return {
     type: "contract",
-    ledger: 1234,
-    ledgerClosedAt: "2025-01-01T00:00:00Z",
-    contractId: "CTEST",
-    id: "0000-0001",
-    pagingToken: "0000-0001",
+    ledger,
+    ledgerClosedAt,
+    contractId: CONTRACT_ID,
+    topic: [topic0, topic1],
+    value: dataB64,
+    id: "test-id",
+    pagingToken: "test-paging-token",
     inSuccessfulContractCall: true,
-    topic,
-    value,
-    ...overrides,
   };
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
-describe("decodeEvent — multisig-admin events", () => {
-  // ── SignerAdd ──────────────────────────────────────────────────────────────
-  describe("SignerAdd", () => {
-    it("decodes eventType, contractId, and signerAddress", () => {
-      const raw = makeRaw(
-        [toB64(scSymbol("SignerAdd")), toB64(scAccountAddress(0xaa))],
-        toB64(scVoid())
-      );
-      const decoded = decodeEvent(raw);
-      assert.ok(decoded !== null, "expected non-null decoded event");
-      assert.equal(decoded.eventType, "SignerAdd");
-      assert.equal(decoded.contractId, "CTEST");
-      assert.equal(decoded.signerAddress, ADDR_AA);
-      assert.equal(decoded.newThreshold, null);
-      assert.equal(decoded.validCount, null);
-      assert.equal(decoded.address, null);
-    });
+test("decodes a ComplianceEvent to the expected shape", () => {
+  const raw = buildComplianceEventRaw({});
+  const result = decodeEvent(raw);
 
-    it("records the ledger sequence and timestamp", () => {
-      const raw = makeRaw(
-        [toB64(scSymbol("SignerAdd")), toB64(scAccountAddress(0xaa))],
-        toB64(scVoid())
-      );
-      const decoded = decodeEvent(raw);
-      assert.ok(decoded !== null);
-      assert.equal(decoded.ledgerSequence, 1234);
-      assert.equal(decoded.timestamp, Math.floor(new Date("2025-01-01T00:00:00Z").getTime() / 1000));
-    });
+  assert.notEqual(result, null, "decodeEvent should not return null");
+  assert.strictEqual(result!.eventType, "ComplianceEvent");
+  assert.strictEqual(result!.kind, KIND);
 
-    it("returns null when signer topic is missing", () => {
-      const raw = makeRaw([toB64(scSymbol("SignerAdd"))], toB64(scVoid()));
-      assert.equal(decodeEvent(raw), null);
-    });
-  });
+  // subject address → result.address; must be a G-address
+  assert.notEqual(result!.address, null);
+  assert.match(result!.address!, /^G/, "subject address should be a G-address");
 
-  // ── SignerRm ───────────────────────────────────────────────────────────────
-  describe("SignerRm", () => {
-    it("decodes eventType and signerAddress for the removed signer", () => {
-      const raw = makeRaw(
-        [toB64(scSymbol("SignerRm")), toB64(scAccountAddress(0xbb))],
-        toB64(scVoid())
-      );
-      const decoded = decodeEvent(raw);
-      assert.ok(decoded !== null);
-      assert.equal(decoded.eventType, "SignerRm");
-      assert.equal(decoded.signerAddress, ADDR_BB);
-      assert.equal(decoded.newThreshold, null);
-      assert.equal(decoded.validCount, null);
-    });
+  // source address
+  assert.notEqual(result!.source, null);
+  assert.match(result!.source!, /^G/, "source address should be a G-address");
 
-    it("returns null when signer topic is missing", () => {
-      const raw = makeRaw([toB64(scSymbol("SignerRm"))], toB64(scVoid()));
-      assert.equal(decodeEvent(raw), null);
-    });
-  });
+  // subject and source encode different public keys
+  assert.notEqual(result!.address, result!.source, "subject and source should differ");
 
-  // ── ThreshSet ─────────────────────────────────────────────────────────────
-  describe("ThreshSet", () => {
-    it("decodes newThreshold from the data U32", () => {
-      const raw = makeRaw([toB64(scSymbol("ThreshSet"))], toB64(scU32(3)));
-      const decoded = decodeEvent(raw);
-      assert.ok(decoded !== null);
-      assert.equal(decoded.eventType, "ThreshSet");
-      assert.equal(decoded.newThreshold, 3);
-      assert.equal(decoded.signerAddress, null);
-      assert.equal(decoded.validCount, null);
-    });
+  assert.strictEqual(result!.detail, DETAIL);
 
-    it("decodes threshold value 1", () => {
-      const raw = makeRaw([toB64(scSymbol("ThreshSet"))], toB64(scU32(1)));
-      const decoded = decodeEvent(raw);
-      assert.ok(decoded !== null);
-      assert.equal(decoded.newThreshold, 1);
-    });
+  // primitive-only fields must be null
+  assert.strictEqual(result!.addressTo, null);
+  assert.strictEqual(result!.amount, null);
+  assert.strictEqual(result!.jurisdiction, null);
 
-    it("returns null when data is not a U32", () => {
-      // Pass Void instead of U32 — decoder should return null
-      const raw = makeRaw([toB64(scSymbol("ThreshSet"))], toB64(scVoid()));
-      assert.equal(decodeEvent(raw), null);
-    });
-  });
+  // ledger metadata
+  assert.strictEqual(result!.ledgerSequence, 1234);
+  assert.strictEqual(result!.timestamp, 1735689600); // 2025-01-01T00:00:00Z
 
-  // ── AuthOk ────────────────────────────────────────────────────────────────
-  describe("AuthOk", () => {
-    it("decodes validCount and newThreshold from the Vec data", () => {
-      const raw = makeRaw(
-        [toB64(scSymbol("AuthOk"))],
-        toB64(scVec([scU32(2), scU32(3)]))
-      );
-      const decoded = decodeEvent(raw);
-      assert.ok(decoded !== null);
-      assert.equal(decoded.eventType, "AuthOk");
-      assert.equal(decoded.validCount, 2);
-      assert.equal(decoded.newThreshold, 3);
-      assert.equal(decoded.signerAddress, null);
-      assert.equal(decoded.address, null);
-    });
+  assert.strictEqual(result!.contractId, CONTRACT_ID);
 
-    it("decodes a 1-of-1 auth approval", () => {
-      const raw = makeRaw(
-        [toB64(scSymbol("AuthOk"))],
-        toB64(scVec([scU32(1), scU32(1)]))
-      );
-      const decoded = decodeEvent(raw);
-      assert.ok(decoded !== null);
-      assert.equal(decoded.validCount, 1);
-      assert.equal(decoded.newThreshold, 1);
-    });
+  // rawTopics should round-trip
+  assert.ok(
+    result!.rawTopics.includes(raw.topic[0]),
+    "rawTopics should include the first topic base64"
+  );
+});
 
-    it("stores both values as null when data is not a two-element Vec", () => {
-      // Pass a Void data value — decoder should not crash but both counts null
-      const raw = makeRaw([toB64(scSymbol("AuthOk"))], toB64(scVoid()));
-      const decoded = decodeEvent(raw);
-      assert.ok(decoded !== null);
-      assert.equal(decoded.validCount, null);
-      assert.equal(decoded.newThreshold, null);
-    });
-  });
+test("decodes ComplianceEvent with various kind values", () => {
+  for (const kind of ["deny_add", "deny_remove", "jurisdiction_set", "allow_add"]) {
+    const raw = buildComplianceEventRaw({ kind });
+    const result = decodeEvent(raw);
 
-  // ── Unknown events still rejected ─────────────────────────────────────────
-  describe("unknown event type", () => {
-    it("returns null for an unrecognised symbol", () => {
-      const raw = makeRaw([toB64(scSymbol("Unknown"))], toB64(scVoid()));
-      assert.equal(decodeEvent(raw), null);
-    });
-  });
+    assert.notEqual(result, null, `should decode event with kind "${kind}"`);
+    assert.strictEqual(result!.eventType, "ComplianceEvent", `eventType for kind "${kind}"`);
+    assert.strictEqual(result!.kind, kind, `kind field for "${kind}"`);
+  }
+});
 
-  // ── Existing compliance-primitives events unaffected ──────────────────────
-  describe("existing AllowAdd event still decodes correctly", () => {
-    it("returns a non-null event with eventType AllowAdd", () => {
-      const raw = makeRaw(
-        [toB64(scSymbol("AllowAdd")), toB64(scAccountAddress(0xaa))],
-        toB64(scVoid())
-      );
-      const decoded = decodeEvent(raw);
-      assert.ok(decoded !== null);
-      assert.equal(decoded.eventType, "AllowAdd");
-      assert.equal(decoded.address, ADDR_AA);
-      assert.equal(decoded.signerAddress, null);
-    });
-  });
+test("does not misidentify AllowAdd as ComplianceEvent", () => {
+  // AllowAdd: topics=[Symbol("AllowAdd"), Address], data=Void
+  const topic0 = bytesToBase64(xdrSymbol("AllowAdd"));
+  const topic1 = bytesToBase64(xdrAccountAddress(SUBJECT_KEY));
+  const dataB64 = bytesToBase64(u32(1)); // ScVal::Void
+
+  const raw: RawSorobanEvent = {
+    type: "contract",
+    ledger: 100,
+    ledgerClosedAt: "2025-01-01T00:00:00Z",
+    contractId: CONTRACT_ID,
+    topic: [topic0, topic1],
+    value: dataB64,
+    id: "test-id-2",
+    pagingToken: "token-2",
+    inSuccessfulContractCall: true,
+  };
+
+  const result = decodeEvent(raw);
+  assert.notEqual(result, null, "should decode AllowAdd");
+  assert.strictEqual(result!.eventType, "AllowAdd");
+  assert.strictEqual(result!.kind, null, "kind should be null for primitive events");
+  assert.strictEqual(result!.source, null, "source should be null for primitive events");
+  assert.strictEqual(result!.detail, null, "detail should be null for primitive events");
+});
+
+test("returns null for events with fewer than 2 topics", () => {
+  const raw: RawSorobanEvent = {
+    type: "contract",
+    ledger: 1,
+    ledgerClosedAt: "2025-01-01T00:00:00Z",
+    contractId: CONTRACT_ID,
+    topic: [bytesToBase64(xdrSymbol("deny_add"))],
+    value: "",
+    id: "test-id-3",
+    pagingToken: "token-3",
+    inSuccessfulContractCall: true,
+  };
+
+  const result = decodeEvent(raw);
+  assert.strictEqual(result, null, "single-topic event should decode to null");
+});
+
+test("does not misidentify DenyAdd (Symbol+Address+Void data) as ComplianceEvent", () => {
+  // DenyAdd: topics=[Symbol("DenyAdd"), Address], data=Void — Void is not a Map
+  const topic0 = bytesToBase64(xdrSymbol("DenyAdd"));
+  const topic1 = bytesToBase64(xdrAccountAddress(SUBJECT_KEY));
+  const dataB64 = bytesToBase64(u32(1)); // ScVal::Void
+
+  const raw: RawSorobanEvent = {
+    type: "contract",
+    ledger: 1,
+    ledgerClosedAt: "2025-01-01T00:00:00Z",
+    contractId: CONTRACT_ID,
+    topic: [topic0, topic1],
+    value: dataB64,
+    id: "test-id-4",
+    pagingToken: "token-4",
+    inSuccessfulContractCall: true,
+  };
+
+  const result = decodeEvent(raw);
+  assert.notEqual(result, null, "should decode DenyAdd");
+  assert.strictEqual(result!.eventType, "DenyAdd");
+});
+
+test("handles an empty detail string", () => {
+  const raw = buildComplianceEventRaw({ detail: "" });
+  const result = decodeEvent(raw);
+
+  assert.notEqual(result, null);
+  assert.strictEqual(result!.eventType, "ComplianceEvent");
+  assert.strictEqual(result!.detail, "");
 });
