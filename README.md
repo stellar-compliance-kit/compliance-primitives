@@ -19,20 +19,20 @@ independently testable contracts for exactly these checks.
 
 ## What's in this repo
 
-This is a Cargo workspace with three focused Soroban contracts, each doing
+This is a Cargo workspace with nine focused Soroban contracts, each doing
 one job:
 
-- **[`allowlist-token`](./contracts/allowlist-token)** — a token wrapper
-  that only permits transfers between two addresses that are both present
-  on an on-chain allowlist. Admin-managed; forwards cleared transfers to an
-  underlying SEP-41 token contract.
-- **[`denylist-gate`](./contracts/denylist-gate)** — a standalone denylist
-  other contracts call via cross-contract invocation (`check(address)`)
-  before executing a transfer. Not a token itself — meant to be composed.
-- **[`jurisdiction-flag`](./contracts/jurisdiction-flag)** — attaches an
-  issuer-controlled jurisdiction code (e.g. an ISO country code) to an
-  address, with a helper (`is_permitted_jurisdiction`) other contracts can
-  call to check an address against a permitted-jurisdictions list.
+| Contract | Description |
+| --- | --- |
+| [`allowlist-token`](./contracts/allowlist-token) | Token wrapper that only permits transfers between two addresses that are both present on an on-chain allowlist. Admin-managed; forwards cleared transfers to an underlying SEP-41 token contract. |
+| [`denylist-gate`](./contracts/denylist-gate) | Standalone denylist other contracts call via cross-contract invocation (`check(address)`) before executing a transfer. Not a token itself — meant to be composed. |
+| [`jurisdiction-flag`](./contracts/jurisdiction-flag) | Attaches an issuer-controlled jurisdiction code (e.g. an ISO country code) to an address, with a helper (`is_permitted_jurisdiction`) other contracts can call to check an address against a permitted-jurisdictions list. |
+| [`audit-log`](./contracts/audit-log) | On-chain, append-only audit trail for compliance events emitted by other primitives, queryable by other contracts at invocation time. |
+| [`circuit-breaker`](./contracts/circuit-breaker) | Admin-controlled emergency freeze switch other contracts can check before allowing a transfer. |
+| [`compliance-aggregator`](./contracts/compliance-aggregator) | Batches `denylist-gate` and `jurisdiction-flag` checks into a single cross-contract call, returning an aggregated pass/fail plus a per-check breakdown. |
+| [`multisig-admin`](./contracts/multisig-admin) | M-of-N multisig authorization, usable as the `admin`/`issuer` address of any of the other primitives via Soroban's custom-account interface. |
+| [`pausable`](./contracts/pausable) | Shared pause/unpause helper library composed into the other contracts at compile time. Not a deployable contract itself — no `#[contract]` macro or wasm exports. |
+| [`policy-engine`](./contracts/policy-engine) | Composes multiple compliance checks (denylist, jurisdiction) with configurable AND/OR logic into a single `evaluate` call. |
 
 [`/examples/denylist-gate-consumer`](./examples/denylist-gate-consumer) is a
 minimal reference token showing the cross-contract calling pattern for
@@ -83,6 +83,12 @@ build all contracts and deploy one to testnet in a single step:
 STELLAR_SOURCE=<your-testnet-identity> ./scripts/deploy-testnet.sh denylist-gate
 ```
 
+To deploy and wire up **all eight deployable contracts** in the workspace
+in one step, see
+[`scripts/deploy-full-stack-testnet.sh`](./scripts/deploy-full-stack-testnet.sh)
+and its walkthrough,
+[`docs/full-stack-testnet-walkthrough.md`](./docs/full-stack-testnet-walkthrough.md).
+
 ### Working with a single contract
 
 You don't need to build or test the whole workspace to work on one
@@ -115,6 +121,12 @@ it's a thin wrapper you can deploy in front of an existing SEP-41 token —
 but even it delegates the real transfer to the underlying token contract
 rather than reimplementing token logic itself.
 
+## Choosing which primitives to compose
+
+With nine contracts now available, the decision of which primitives to use depends on your use case.
+See **[docs/PRIMITIVE_SELECTION_GUIDE.md](./docs/PRIMITIVE_SELECTION_GUIDE.md)** for profiles
+of common RWA and stablecoin use cases, and which primitive combinations fit each.
+
 ## Migrating from hand-rolled compliance
 
 If you already have allowlist, denylist, or jurisdiction checks baked into
@@ -124,7 +136,8 @@ mapping your existing checks, deployment & wiring, data backfill, and rollback.
 
 ## Contributing
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for the fork → branch → PR flow.
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for the fork → branch → PR flow,
+and [GOVERNANCE.md](./GOVERNANCE.md) for how issues are triaged and labeled.
 This repo is part of the **Drips Wave Stellar Program**, and issues are
 labeled by complexity (`complexity: trivial`, `complexity: medium`,
 `complexity: high`) so you can find something that matches how deep you

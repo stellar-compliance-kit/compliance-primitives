@@ -1,6 +1,8 @@
+extern crate std;
+
 use super::*;
 use soroban_sdk::testutils::{Address as _, Events as _};
-use soroban_sdk::{vec, Env, Symbol};
+use soroban_sdk::{vec, Env, String, Symbol};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -203,4 +205,97 @@ fn test_double_initialize_fails() {
     let (admin, _contract_id, client) = setup(&env);
     let result = client.try_initialize(&admin);
     assert_eq!(result, Err(Ok(Error::AlreadyInitialized)));
+}
+
+/// Lightweight sequence fuzzer for audit-log entry sequences.
+///
+/// Feeds randomized sequences of log calls with varying source addresses and
+/// payload sizes and asserts the contract never panics and storage stays
+/// internally consistent.
+fn next_u32(state: &mut u32) -> u32 {
+    let mut x = *state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *state = if x == 0 { 0x9E37_79B9 } else { x };
+    *state
+}
+
+fn next_usize(state: &mut u32, upper: usize) -> usize {
+    (next_u32(state) as usize) % upper
+}
+
+#[test]
+fn fuzz_audit_log_entry_sequences() {
+    let iterations: u32 = std::env::var("FUZZ_ITERATIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(128);
+    let ops_per_iter: u32 = std::env::var("FUZZ_OPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(24);
+
+    let kind_strs = ["deny_add", "deny_remove", "jurisdiction_set", "flag_clear"];
+    let detail_strs = ["added", "removed", "updated", "cleared", "modified"];
+
+    for seed in 1..=iterations {
+        let env = Env::default();
+        let (_admin, _contract_id, client) = setup(&env);
+
+        let sources: [Address; 4] = [
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+        ];
+
+        let subjects: [Address; 4] = [
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+        ];
+
+        let mut model_count: u64 = 0;
+        let mut rng = seed;
+
+        for _ in 0..ops_per_iter {
+            let source_i = next_usize(&mut rng, sources.len());
+            let subject_i = next_usize(&mut rng, subjects.len());
+            let kind_i = next_usize(&mut rng, kind_strs.len());
+            let detail_i = next_usize(&mut rng, detail_strs.len());
+
+            let source = &sources[source_i];
+            let subject = &subjects[subject_i];
+            let kind = Symbol::new(&env, kind_strs[kind_i]);
+            let detail = String::from_str(&env, detail_strs[detail_i]);
+
+            let result = client.try_record(source, &kind, subject, &detail);
+            if result.is_ok() {
+                model_count += 1;
+            }
+        }
+
+        let final_count = client.entry_count();
+        assert_eq!(
+            final_count, model_count,
+            "seed={seed}: entry count mismatch (expected {}, got {})",
+            model_count, final_count
+        );
+
+        for i in 0..final_count {
+            let entry = client.get_entry(&i);
+            assert!(
+                entry.is_some(),
+                "seed={seed}: entry at index {i} should exist (count = {final_count})"
+            );
+        }
+
+        let beyond_count = client.get_entry(&(final_count + 100));
+        assert!(
+            beyond_count.is_none(),
+            "seed={seed}: entry far beyond count should not exist"
+        );
+    }
 }

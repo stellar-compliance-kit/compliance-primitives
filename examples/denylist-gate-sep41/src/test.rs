@@ -154,6 +154,91 @@ fn test_burn_reduces_balance() {
 }
 
 #[test]
+fn test_approve_sets_allowance() {
+    let env = Env::default();
+    let (_gate_admin, _gate_id, _token_admin, client) = setup(&env);
+    let alice = Address::generate(&env);
+    let spender = Address::generate(&env);
+
+    assert_eq!(client.allowance(&alice, &spender), 0);
+    client.approve(&alice, &spender, &500, &9999u32);
+    assert_eq!(client.allowance(&alice, &spender), 500);
+}
+
+#[test]
+fn test_burn_from_reduces_balance_and_allowance() {
+    let env = Env::default();
+    let (_gate_admin, _gate_id, token_admin, client) = setup(&env);
+    let alice = Address::generate(&env);
+    let spender = Address::generate(&env);
+
+    client.mint(&token_admin, &alice, &1_000);
+    client.approve(&alice, &spender, &500, &9999u32);
+    client.burn_from(&spender, &alice, &300);
+
+    assert_eq!(client.balance(&alice), 700);
+    assert_eq!(client.allowance(&alice, &spender), 200);
+}
+
+// ---------------------------------------------------------------------------
+// SEP-41 conformance is preserved for non-denylisted addresses
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_transfer_denied_emits_transfer_denied_event() {
+    let env = Env::default();
+    let (gate_admin, gate_id, token_admin, client) = setup(&env);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+
+    client.mint(&token_admin, &alice, &1_000);
+    DenylistGateClient::new(&env, &gate_id).add_to_denylist(&gate_admin, &alice);
+
+    let events_before = env.events().all().len();
+    let _ = client.try_transfer(&alice, &bob, &400);
+    // `TransferDenied` is published before the call reverts, so it is
+    // observable in the recorded event log even though state changes roll back.
+    assert_eq!(env.events().all().len(), events_before + 1);
+}
+
+#[test]
+fn test_denylist_rejection_does_not_break_conformance_for_others() {
+    // A denylisted address is rejected, while the full SEP-41 entrypoint
+    // surface (approve/allowance/transfer/transfer_from/burn) keeps working
+    // normally for a non-denylisted address in the same contract instance.
+    let env = Env::default();
+    let (gate_admin, gate_id, token_admin, client) = setup(&env);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    let carol = Address::generate(&env);
+    let spender = Address::generate(&env);
+
+    client.mint(&token_admin, &alice, &1_000);
+    client.mint(&token_admin, &bob, &1_000);
+    DenylistGateClient::new(&env, &gate_id).add_to_denylist(&gate_admin, &alice);
+
+    // Alice (denylisted) is rejected.
+    let result = client.try_transfer(&alice, &carol, &100);
+    assert_eq!(result, Err(Ok(Error::DeniedByGate)));
+
+    // Bob (clear) keeps full SEP-41 conformance: approve, transfer,
+    // transfer_from, and burn all still work.
+    client.approve(&bob, &spender, &500, &9999u32);
+    assert_eq!(client.allowance(&bob, &spender), 500);
+
+    client.transfer(&bob, &carol, &200);
+    assert_eq!(client.balance(&bob), 800);
+    assert_eq!(client.balance(&carol), 200);
+
+    client.transfer_from(&spender, &bob, &carol, &150);
+    assert_eq!(client.balance(&bob), 650);
+    assert_eq!(client.balance(&carol), 350);
+
+    client.burn(&bob, &50);
+    assert_eq!(client.balance(&bob), 600);
+}
+
+#[test]
 fn test_double_initialize_fails() {
     let env = Env::default();
     let (_gate_admin, gate_id, token_admin, client) = setup(&env);

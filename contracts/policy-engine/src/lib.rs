@@ -103,6 +103,16 @@ enum DataKey {
 // Errors and events
 // ---------------------------------------------------------------------------
 
+/// Maximum number of addresses accepted by `batch_evaluate` in a single call.
+///
+/// Soroban imposes a per-transaction CPU-instruction and memory budget. Each
+/// address in the batch requires one or more cross-contract calls (one per
+/// registered check), so an unbounded list would allow a caller to exhaust
+/// the budget and brick the transaction. 20 was chosen to mirror the limit
+/// used in the `compliance-aggregator` batch family and to keep the worst-case
+/// instruction cost within the conservative end of the Soroban default budget.
+pub const MAX_BATCH_SIZE: u32 = 20;
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -111,6 +121,8 @@ pub enum Error {
     AlreadyInitialized = 2,
     NotAuthorized = 3,
     PolicyViolation = 4,
+    /// `batch_evaluate` was called with more than `MAX_BATCH_SIZE` addresses.
+    BatchTooLarge = 5,
 }
 
 /// Emitted by `evaluate` regardless of the pass/fail outcome so that
@@ -261,6 +273,75 @@ impl PolicyEngine {
         .publish(&env);
 
         Ok(passed)
+    }
+
+    /// Evaluate the configured policy for each address in `addresses`
+    /// individually and return a `Vec<bool>` of results in the same order.
+    ///
+    /// Each address is run through every registered check on its own — this
+    /// is a per-address (not per-transfer) evaluation. Use `evaluate` when
+    /// you need to gate a specific `from → to` transfer; use `batch_evaluate`
+    /// when you want to screen a list of addresses in a single call (e.g.
+    /// pre-screening a participant registry).
+    ///
+    /// Returns `Err(Error::BatchTooLarge)` if `addresses.len() >
+    /// MAX_BATCH_SIZE` to prevent budget exhaustion. Returns
+    /// `Err(Error::NotInitialized)` if the contract has not been set up yet.
+    ///
+    /// No `PolicyResult` event is emitted per-address to keep the batch
+    /// cost predictable; callers that need an audit trail should call
+    /// `evaluate` individually for the addresses they intend to act on.
+    pub fn batch_evaluate(env: Env, addresses: Vec<Address>) -> Result<Vec<bool>, Error> {
+        if addresses.len() > MAX_BATCH_SIZE {
+            return Err(Error::BatchTooLarge);
+        }
+
+        let checks: Vec<CheckKind> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Checks)
+            .ok_or(Error::NotInitialized)?;
+        let op: CombineOp = env
+            .storage()
+            .instance()
+            .get(&DataKey::CombineOp)
+            .ok_or(Error::NotInitialized)?;
+
+        let mut results: Vec<bool> = Vec::new(&env);
+
+        for address in addresses.iter() {
+            let passed = match op {
+                CombineOp::All => {
+                    let mut all_pass = true;
+                    for i in 0..checks.len() {
+                        let check = checks.get(i).unwrap();
+                        if !Self::run_check(&env, &check, &address) {
+                            all_pass = false;
+                            break;
+                        }
+                    }
+                    all_pass
+                }
+                CombineOp::Any => {
+                    if checks.is_empty() {
+                        false
+                    } else {
+                        let mut any_pass = false;
+                        for i in 0..checks.len() {
+                            let check = checks.get(i).unwrap();
+                            if Self::run_check(&env, &check, &address) {
+                                any_pass = true;
+                                break;
+                            }
+                        }
+                        any_pass
+                    }
+                }
+            };
+            results.push_back(passed);
+        }
+
+        Ok(results)
     }
 
     // -----------------------------------------------------------------------

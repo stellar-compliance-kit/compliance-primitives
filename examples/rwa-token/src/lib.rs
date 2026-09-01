@@ -1,5 +1,22 @@
-//! Reference example: an RWA-style token that composes all three compliance
-//! primitives before mutating balances.
+//! # RWA Token Example
+//!
+//! A complete reference implementation of a Real-World Asset (RWA) token that
+//! composes all three compliance primitives (allowlist, denylist, jurisdiction)
+//! before mutating balances.
+//!
+//! ## Composition Pattern
+//!
+//! This example demonstrates a **serial composition** of three compliance gates
+//! in a fail-fast pattern. Unlike `/examples/rwa-compliance-flow` (which is a
+//! test-oriented integration showing composition semantics) or
+//! `/examples/denylist-gate-sep41` (which is a SEP-41 token gated by a single
+//! denylist), this crate shows a **full, production-like token implementation**
+//! that:
+//!
+//! 1. Implements custom balance tracking (not relying on SEP-41 out-of-the-box)
+//! 2. Wires three compliance primitives as dependencies
+//! 3. Applies all three checks in series during `transfer` with specific error
+//!    handling for each gate
 //!
 //! Check order in `transfer` (fail-fast, specific error per gate):
 //! 1. **Allowlist** — both `from` and `to` must pass `is_allowed`
@@ -8,10 +25,19 @@
 //!    `is_permitted_jurisdiction` against the token's configured
 //!    `allowed_codes`
 //!
+//! After all compliance checks clear, the balance mutation succeeds.
+//!
+//! ## Implementation Details
+//!
 //! Like `/examples/denylist-gate-consumer`, this crate does **not** depend
 //! on the primitive crates' `#[contractimpl]` binaries at link time.
 //! Clients are generated from `#[contractclient]` traits that only describe
-//! the call shape.
+//! the call shape. This avoids linker symbol collisions and keeps each contract's
+//! wasm binary self-contained.
+//!
+//! The `mint` helper method is a non-standard addition (not part of the token
+//! spec) used for testing and demonstration; a real RWA token would use an
+//! external minting process.
 #![no_std]
 
 use soroban_sdk::{

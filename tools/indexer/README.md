@@ -11,15 +11,23 @@ of it — this is the foundation, not the full product.
 |-----------|--------|-----|
 | Runtime | Node.js 20+ | Ships everywhere, native `fetch`, zero install friction |
 | Language | TypeScript | Type safety without a heavy compile step (`tsx` for dev) |
-| Database | SQLite (better-sqlite3) | Single file, no server, trivially swapped for Postgres |
+| Database | SQLite ([sql.js](https://sql.js.org)) | Pure WebAssembly — no native build step, no compiler toolchain required |
 | RPC | Raw JSON-RPC (`getEvents`) | Minimal deps; only one RPC method is needed |
 
-To use Postgres instead of SQLite, swap `better-sqlite3` for `pg` and
-translate the SQL in `src/db.ts` — the schema is plain ANSI SQL.
+`sql.js` runs SQLite entirely in WebAssembly and holds the database
+in-memory. The indexer exports the in-memory state to disk after every
+write batch, so restarts resume from the last checkpoint. The database
+file (default: `compliance.db`) is a standard SQLite file — you can open
+it with any SQLite tool (`sqlite3`, DB Browser for SQLite, etc.).
+
+To use Postgres instead of SQLite, swap `sql.js` for `pg` and translate
+the SQL in `src/db.ts` — the schema is plain ANSI SQL.
 
 ---
 
 ## Setup
+
+**Prerequisite:** Node.js 20 or later.
 
 ```sh
 cd tools/indexer
@@ -29,18 +37,68 @@ cp .env.example .env
 # Edit .env — at minimum set one contract ID
 ```
 
-Run in dev mode (no compile step):
+Run in dev mode (no compile step, `tsx` runs TypeScript directly):
 
 ```sh
 npm run dev
 ```
 
-Build + run:
+Build and run (TypeScript compiled to `dist/`, then executed with `node`):
 
 ```sh
-npm run build
-npm start
+npm run build   # emits compiled JS to dist/
+npm start       # runs dist/index.js
 ```
+
+---
+
+## Docker
+
+### Build the image
+
+Run from the **repository root** (so Docker has access to the full build
+context) or from within `tools/indexer`:
+
+```sh
+# From repository root
+docker build -t compliance-indexer:latest tools/indexer
+
+# From tools/indexer
+docker build -t compliance-indexer:latest .
+```
+
+The image uses a two-stage build: the `builder` stage compiles TypeScript and
+prunes dev dependencies; the `runtime` stage copies only the compiled output
+and production `node_modules`, keeping the final image small.
+
+### Run the container
+
+Copy `.env.example` to `.env`, fill in your contract IDs and RPC URL, then:
+
+```sh
+docker run --rm \
+  --env-file tools/indexer/.env \
+  -v compliance-db:/data \
+  compliance-indexer:latest
+```
+
+`-v compliance-db:/data` mounts a named Docker volume so the SQLite database
+(`/data/compliance.db`) persists across container restarts. You can swap
+`/data` for any host path you prefer.
+
+To override individual variables without a full `.env` file:
+
+```sh
+docker run --rm \
+  -e RPC_URL=https://soroban-testnet.stellar.org \
+  -e NETWORK_PASSPHRASE="Test SDF Network ; September 2015" \
+  -e DENYLIST_CONTRACT_ID=C... \
+  -v compliance-db:/data \
+  compliance-indexer:latest
+```
+
+> **Note:** No secrets are baked into the image. All configuration is
+> supplied at runtime via environment variables.
 
 ---
 
@@ -118,10 +176,14 @@ SELECT address, code FROM jurisdictions WHERE contract_id = '<your-contract-id>'
 SELECT address FROM jurisdictions WHERE contract_id = '...' AND code = 'US';
 ```
 
-### `indexer_state`
+### `indexer_state` — internal key/value store
 
-Internal key/value table. Stores `last_ledger` so restarts resume without
-re-scanning from the beginning.
+| Column | Type | Description |
+|--------|------|-------------|
+| `key` | `TEXT` PK | Key name |
+| `value` | `TEXT` | Value for the key |
+
+Currently stores one row: `key = 'last_ledger'`, `value = <ledger sequence>`. On startup the indexer reads this row to resume from where it left off rather than re-scanning from the beginning.
 
 ---
 

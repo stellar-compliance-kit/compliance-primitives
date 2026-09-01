@@ -293,3 +293,63 @@ footer .foot-row {
   flex-wrap: wrap;
   gap: 8px;
 }
+
+/* Search and documentation pages */
+.search-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  margin-top: 22px;
+  margin-bottom: 7px;
+}
+.search-input {
+  width: min(100%, 520px);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  padding: 11px 13px;
+  font: inherit;
+  font-size: 14px;
+}
+.search-input:focus {
+  outline: 3px solid var(--accent-bg);
+  border-color: var(--accent);
+}
+.search-empty {
+  color: var(--text-dim);
+  font-size: 14px;
+}
+.page {
+  padding-top: 56px;
+  padding-bottom: 56px;
+}
+.page h1 {
+  margin-bottom: 12px;
+}
+.diagram {
+  margin: 28px 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: auto;
+  background: var(--bg-raised);
+}
+.diagram img {
+  display: block;
+  width: 100%;
+  min-width: 760px;
+}
+.markdown {
+  border-top: 1px solid var(--border);
+  padding-top: 24px;
+}
+.markdown pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--code-text);
+  font-size: 13px;
+  line-height: 1.65;
+}
+[hidden] {
+  display: none !important;
+}

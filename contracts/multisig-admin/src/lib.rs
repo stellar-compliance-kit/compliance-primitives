@@ -53,6 +53,51 @@ use soroban_sdk::{
 };
 
 // ---------------------------------------------------------------------------
+// Events
+// ---------------------------------------------------------------------------
+
+mod events {
+    use soroban_sdk::{symbol_short, Address, Env};
+
+    /// Emitted when a new signer is added to the set.
+    ///
+    /// topics : [Symbol("SignerAdded"), Address(signer)]
+    /// data   : Void
+    pub fn signer_added(env: &Env, signer: &Address) {
+        env.events()
+            .publish((symbol_short!("SignerAdd"), signer.clone()), ());
+    }
+
+    /// Emitted when a signer is removed from the set.
+    ///
+    /// topics : [Symbol("SignerRemoved"), Address(signer)]
+    /// data   : Void
+    pub fn signer_removed(env: &Env, signer: &Address) {
+        env.events()
+            .publish((symbol_short!("SignerRm"), signer.clone()), ());
+    }
+
+    /// Emitted when the signing threshold is updated.
+    ///
+    /// topics : [Symbol("ThresholdSet")]
+    /// data   : u32 (new threshold)
+    pub fn threshold_updated(env: &Env, threshold: u32) {
+        env.events()
+            .publish((symbol_short!("ThreshSet"),), threshold);
+    }
+
+    /// Emitted on every successful `__check_auth` call.
+    ///
+    /// topics : [Symbol("AuthOk")]
+    /// data   : (u32 valid_count, u32 threshold)  — encoded as a two-element
+    ///          Vec so both values travel in a single ScVal.
+    pub fn auth_approved(env: &Env, valid_count: u32, threshold: u32) {
+        env.events()
+            .publish((symbol_short!("AuthOk"),), (valid_count, threshold));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Storage
 // ---------------------------------------------------------------------------
 
@@ -163,8 +208,9 @@ impl MultisigAdmin {
             }
         }
 
-        signers.push_back(new_signer);
+        signers.push_back(new_signer.clone());
         env.storage().instance().set(&DataKey::Signers, &signers);
+        events::signer_added(&env, &new_signer);
         Ok(())
     }
 
@@ -202,6 +248,7 @@ impl MultisigAdmin {
         }
 
         env.storage().instance().set(&DataKey::Signers, &signers);
+        events::signer_removed(&env, &signer);
         Ok(())
     }
 
@@ -222,6 +269,7 @@ impl MultisigAdmin {
         env.storage()
             .instance()
             .set(&DataKey::Threshold, &threshold);
+        events::threshold_updated(&env, threshold);
         Ok(())
     }
 
@@ -444,6 +492,7 @@ impl CustomAccountInterface for MultisigAdmin {
         }
 
         if valid_count >= threshold {
+            events::auth_approved(&env, valid_count, threshold);
             Ok(())
         } else {
             Err(Error::ThresholdNotMet)

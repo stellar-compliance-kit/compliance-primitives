@@ -1,18 +1,38 @@
-//! Integration example: a full RWA token flow using all three compliance contracts together.
+//! # RWA Compliance Flow Integration
 //!
-//! This example demonstrates:
-//! 1. A successful token transfer when all three compliance checks pass
-//! 2. Blocked transfers when each compliance check independently fails
+//! An integration example demonstrating how the three compliance primitives
+//! compose to form a comprehensive compliance framework for RWA tokens and stablecoins.
 //!
-//! **Key Learning**: The three contracts (`allowlist-token`, `denylist-gate`,
-//! `jurisdiction-flag`) can be composed to create a comprehensive compliance
-//! framework for RWA tokens and stablecoins.
+//! ## Pattern: Policy Composition via Trait-Based Clients
 //!
-//! **Compliance Layers**:
+//! This example shows a **lightweight integration layer** that does not implement
+//! a token itself. Instead, it defines trait-based clients for the three primitives
+//! and demonstrates the canonical composition pattern:
+//!
+//! 1. Each primitive (allowlist, denylist, jurisdiction) is wired independently
+//! 2. Calls are made in series (AND logic); all must pass for a transfer to succeed
+//! 3. Specific error types are returned to identify which check failed
+//!
+//! ## Compliance Layers Demonstrated
+//!
 //! - **Allowlist**: Only allowlisted addresses can transact
 //! - **Denylist**: Sanctioned, defrauded, or court-ordered addresses are blocked
 //! - **Jurisdiction**: Restricts activity to permitted jurisdictions (e.g., regulatory
 //!   requirements)
+//!
+//! ## Differences from other examples
+//!
+//! - **vs. `/examples/rwa-token`**: That crate implements a complete token contract with
+//!   balance tracking and integration of all three gates. This module shows only the
+//!   compliance composition pattern without the token implementation.
+//! - **vs. `/examples/denylist-gate-sep41`**: That crate is a SEP-41 token gated by
+//!   denylist-gate alone. This demonstrates composition of all three gates.
+//!
+//! ## Test Coverage
+//!
+//! The module includes comprehensive tests verifying:
+//! 1. A successful transfer when all three compliance checks pass
+//! 2. Blocked transfers when each compliance check independently fails
 
 #![no_std]
 
@@ -58,3 +78,6 @@ pub trait JurisdictionFlagInterface {
 
 #[cfg(test)]
 mod test;
+
+#[cfg(test)]
+mod policy_engine_test;

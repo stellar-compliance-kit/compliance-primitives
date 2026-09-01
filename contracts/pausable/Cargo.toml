@@ -1,13 +1,14 @@
 [package]
-name = "compliance-pausable"
+name = "pausable"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Shared pausable helper for compliance-primitives contracts. Not a contract itself — no #[contract] macro, no wasm exports."
+description = "Shared pausable primitive for Soroban contracts."
 publish = false
 
 [lib]
+crate-type = ["cdylib", "rlib"]
 doctest = false
 
 [dependencies]
