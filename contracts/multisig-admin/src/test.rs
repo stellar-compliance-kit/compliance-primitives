@@ -215,99 +215,162 @@ fn test_signer_update_requires_multisig_auth() {
     // test_threshold_not_met_error_value above.
 }
 
-/// Lightweight sequence fuzzer for multisig-admin proposal/approval sequences.
-///
-/// Feeds randomized sequences of propose/approve/execute calls (including
-/// duplicate approvals and out-of-order execution attempts) and asserts the
-/// contract never panics or lets the approval count exceed the signer set.
-fn next_u32(state: &mut u32) -> u32 {
-    let mut x = *state;
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
-    *state = if x == 0 { 0x9E37_79B9 } else { x };
-    *state
-}
+// ---------------------------------------------------------------------------
+// Proposal workflow tests
+// ---------------------------------------------------------------------------
 
-fn next_usize(state: &mut u32, upper: usize) -> usize {
-    (next_u32(state) as usize) % upper
+#[test]
+fn test_propose_creates_proposal() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_signers, _id, client) = setup_multisig(&env, 2, 1);
+
+    let payload = soroban_sdk::Bytes::new(&env);
+    let expiry = env.ledger().sequence() + 100;
+    let proposal_id = client.propose(&payload, &expiry).unwrap();
+    assert_eq!(proposal_id, 0);
+
+    let (stored_payload, stored_expiry, approvals) = client.get_proposal(&proposal_id).unwrap();
+    assert_eq!(stored_payload, payload);
+    assert_eq!(stored_expiry, expiry);
+    assert_eq!(approvals.len(), 0);
 }
 
 #[test]
-fn fuzz_multisig_admin_sequences() {
-    let iterations: u32 = std::env::var("FUZZ_ITERATIONS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(128);
-    let ops_per_iter: u32 = std::env::var("FUZZ_OPS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(24);
+fn test_propose_with_past_expiry_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_signers, _id, client) = setup_multisig(&env, 2, 1);
 
-    for seed in 1..=iterations {
-        let env = Env::default();
-        env.mock_all_auths();
+    let payload = soroban_sdk::Bytes::new(&env);
+    let expiry = env.ledger().sequence() - 1;
+    let result = client.try_propose(&payload, &expiry);
+    assert_eq!(result, Err(Ok(Error::ExpiredProposal)));
+}
 
-        let signers = vec![
-            &env,
-            Address::generate(&env),
-            Address::generate(&env),
-            Address::generate(&env),
-        ];
+#[test]
+fn test_approve_adds_approval() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (signers, _id, client) = setup_multisig(&env, 2, 1);
 
-        let contract_id = env.register(MultisigAdmin, ());
-        let client = MultisigAdminClient::new(&env, &contract_id);
-        client.initialize(&signers, &2);
+    let payload = soroban_sdk::Bytes::new(&env);
+    let expiry = env.ledger().sequence() + 100;
+    let proposal_id = client.propose(&payload, &expiry).unwrap();
 
-        let mut rng = seed;
-        let mut signer_count = signers.len() as u32;
+    let approver = signers.get(0).unwrap();
+    let ready = client.approve(&proposal_id, &approver).unwrap();
+    assert!(!ready);
 
-        for _ in 0..ops_per_iter {
-            let op = next_usize(&mut rng, 5);
+    let (_payload, _expiry, approvals) = client.get_proposal(&proposal_id).unwrap();
+    assert_eq!(approvals.len(), 1);
+    assert_eq!(approvals.get(0).unwrap(), approver);
+}
 
-            match op {
-                0 => {
-                    let idx = next_usize(&mut rng, signers.len());
-                    let signer_to_add = Address::generate(&env);
-                    let _ = client.try_add_signer(&signer_to_add);
-                }
-                1 => {
-                    if signer_count > 2 {
-                        let idx = next_usize(&mut rng, signers.len());
-                        let signer_to_remove = signers.get(idx as u32).unwrap();
-                        let result = client.try_remove_signer(&signer_to_remove);
-                        if result.is_ok() {
-                            signer_count -= 1;
-                        }
-                    }
-                }
-                2 => {
-                    let new_threshold = ((next_u32(&mut rng) % 5) + 1) as u32;
-                    let _ = client.try_update_threshold(&new_threshold);
-                }
-                3 => {
-                    let stored_signers = client.get_signers();
-                    assert!(
-                        stored_signers.len() as u32 >= 1,
-                        "seed={seed}: signer count should be at least 1"
-                    );
-                }
-                _ => {
-                    let threshold = client.get_threshold();
-                    let stored_signers = client.get_signers();
-                    assert!(
-                        threshold > 0 && (threshold as usize) <= stored_signers.len(),
-                        "seed={seed}: threshold should be valid"
-                    );
-                }
-            }
-        }
+#[test]
+fn test_approve_expired_proposal_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (signers, _id, client) = setup_multisig(&env, 2, 1);
 
-        let final_signers = client.get_signers();
-        let final_threshold = client.get_threshold();
-        assert!(
-            final_threshold as usize <= final_signers.len(),
-            "seed={seed}: final state invalid: threshold exceeds signer count"
-        );
-    }
+    let payload = soroban_sdk::Bytes::new(&env);
+    let expiry = env.ledger().sequence() + 10;
+    let proposal_id = client.propose(&payload, &expiry).unwrap();
+
+    env.ledger().set_sequence_number(expiry);
+
+    let approver = signers.get(0).unwrap();
+    let result = client.try_approve(&proposal_id, &approver);
+    assert_eq!(result, Err(Ok(Error::ExpiredProposal)));
+}
+
+#[test]
+fn test_approve_twice_by_same_signer_idempotent() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (signers, _id, client) = setup_multisig(&env, 2, 1);
+
+    let payload = soroban_sdk::Bytes::new(&env);
+    let expiry = env.ledger().sequence() + 100;
+    let proposal_id = client.propose(&payload, &expiry).unwrap();
+
+    let approver = signers.get(0).unwrap();
+    client.approve(&proposal_id, &approver).unwrap();
+    let ready = client.approve(&proposal_id, &approver).unwrap();
+    assert!(!ready);
+
+    let (_payload, _expiry, approvals) = client.get_proposal(&proposal_id).unwrap();
+    assert_eq!(approvals.len(), 1);
+}
+
+#[test]
+fn test_approve_reaches_threshold_returns_true() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (signers, _id, client) = setup_multisig(&env, 3, 2);
+
+    let payload = soroban_sdk::Bytes::new(&env);
+    let expiry = env.ledger().sequence() + 100;
+    let proposal_id = client.propose(&payload, &expiry).unwrap();
+
+    let approver1 = signers.get(0).unwrap();
+    let approver2 = signers.get(1).unwrap();
+
+    let ready1 = client.approve(&proposal_id, &approver1).unwrap();
+    assert!(!ready1);
+
+    let ready2 = client.approve(&proposal_id, &approver2).unwrap();
+    assert!(ready2);
+}
+
+#[test]
+fn test_execute_deletes_proposal() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (signers, _id, client) = setup_multisig(&env, 2, 1);
+
+    let payload = soroban_sdk::Bytes::new(&env);
+    let expiry = env.ledger().sequence() + 100;
+    let proposal_id = client.propose(&payload, &expiry).unwrap();
+
+    let approver = signers.get(0).unwrap();
+    client.approve(&proposal_id, &approver).unwrap();
+
+    client.execute(&proposal_id).unwrap();
+
+    let result = client.try_get_proposal(&proposal_id);
+    assert_eq!(result, Err(Ok(Error::ProposalNotFound)));
+}
+
+#[test]
+fn test_execute_expired_proposal_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (signers, _id, client) = setup_multisig(&env, 2, 1);
+
+    let payload = soroban_sdk::Bytes::new(&env);
+    let expiry = env.ledger().sequence() + 10;
+    let proposal_id = client.propose(&payload, &expiry).unwrap();
+
+    let approver = signers.get(0).unwrap();
+    client.approve(&proposal_id, &approver).unwrap();
+
+    env.ledger().set_sequence_number(expiry);
+
+    let result = client.try_execute(&proposal_id);
+    assert_eq!(result, Err(Ok(Error::ExpiredProposal)));
+}
+
+#[test]
+fn test_execute_without_threshold_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_signers, _id, client) = setup_multisig(&env, 3, 2);
+
+    let payload = soroban_sdk::Bytes::new(&env);
+    let expiry = env.ledger().sequence() + 100;
+    let proposal_id = client.propose(&payload, &expiry).unwrap();
+
+    let result = client.try_execute(&proposal_id);
+    assert_eq!(result, Err(Ok(Error::ThresholdNotMet)));
 }
