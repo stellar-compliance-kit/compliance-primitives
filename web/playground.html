@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="Stellar compliance primitives contract explorer and Freighter testnet playground." />
+  <title>Compliance Primitives Playground</title>
+  <link rel="stylesheet" href="playground.css" />
+  <script src="https://unpkg.com/@stellar/freighter-api@6.0.1/build/index.min.js"></script>
+</head>
+<body>
+  <nav>
+    <div class="wrap nav-row">
+      <a class="brand" href="index.html">compliance-primitives</a>
+      <div class="nav-links"><a href="#explorer">Explorer</a><a href="#playground">Playground</a><a href="https://github.com/stellar-compliance-kit/compliance-primitives" target="_blank" rel="noreferrer">GitHub</a></div>
+    </div>
+  </nav>
+  <main id="top">
+    <header class="hero"><div class="wrap hero-grid"><div><span class="badge">STELLAR TESTNET</span><h1>Compliance primitives you can inspect and try.</h1><p class="lede">Discover the nine Soroban contracts in this repository, then connect Freighter to call safe, read-only compliance checks directly from your browser.</p><div class="cta-row"><a class="btn btn-primary" href="#explorer">Explore contracts</a><a class="btn btn-secondary" href="#playground">Open playground</a></div></div><div class="hero-panel"><div class="eyebrow">READ-ONLY BY DESIGN</div><p>The playground builds a simulated contract invocation. It never submits a transaction or asks Freighter to sign.</p><div class="network-pill"><span class="dot"></span> Soroban RPC · Testnet</div></div></div></header>
+    <section id="explorer"><div class="wrap"><div class="section-heading"><div><span class="eyebrow">THE LIBRARY</span><h2>Contract explorer</h2></div><p>Every deployable contract has a concise purpose, interface reference, and a clear place for its future testnet deployment ID.</p></div><div class="cards contract-grid">
+          <article class="card contract-card"><div class="card-top"><span class="contract-index">01</span><span class="tag">Reference contract</span></div><h3>Allowlist Token</h3><p>SEP-41 token transfers gated by an explicit allowlist.</p><div class="fns"><code>is_allowed(address)</code><code>transfer(from, to, amount)</code></div><div class="card-links"><span class="deployment">Testnet ID: <em>Not deployed</em></span><a href="https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/docs/interfaces/allowlist-token.md">Interface →</a></div></article>
+          <article class="card contract-card"><div class="card-top"><span class="contract-index">02</span><span class="tag">Reference contract</span></div><h3>Audit Log</h3><p>Append-only compliance event recording for on-chain auditability.</p><div class="fns"><code>record(...)</code><code>get_events(...)</code></div><div class="card-links"><span class="deployment">Testnet ID: <em>Not deployed</em></span><a href="https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/docs/interfaces/audit-log.md">Interface →</a></div></article>
+          <article class="card contract-card"><div class="card-top"><span class="contract-index">03</span><span class="tag">Reference contract</span></div><h3>Circuit Breaker</h3><p>Emergency stop controls for pausing sensitive contract operations.</p><div class="fns"><code>is_tripped()</code><code>trip(admin)</code><code>reset(admin)</code></div><div class="card-links"><span class="deployment">Testnet ID: <em>Not deployed</em></span><a href="https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/docs/interfaces/circuit-breaker.md">Interface →</a></div></article>
+          <article class="card contract-card"><div class="card-top"><span class="contract-index">04</span><span class="tag">Reference contract</span></div><h3>Compliance Aggregator</h3><p>Composes multiple compliance checks into a reusable policy decision.</p><div class="fns"><code>evaluate(from, to)</code><code>get_checks()</code></div><div class="card-links"><span class="deployment">Testnet ID: <em>Not deployed</em></span><a href="https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/docs/interfaces/compliance-aggregator.md">Interface →</a></div></article>
+          <article class="card contract-card"><div class="card-top"><span class="contract-index">05</span><span class="tag">Reference contract</span></div><h3>Denylist Gate</h3><p>Blocks addresses that appear on a managed denylist.</p><div class="fns"><code>check(address)</code><code>add_to_denylist(...)</code></div><div class="card-links"><span class="deployment">Testnet ID: <em>Not deployed</em></span><a href="https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/docs/interfaces/denylist-gate.md">Interface →</a></div></article>
+          <article class="card contract-card"><div class="card-top"><span class="contract-index">06</span><span class="tag">Reference contract</span></div><h3>Jurisdiction Flag</h3><p>Associates addresses with jurisdiction codes and checks permitted regions.</p><div class="fns"><code>is_permitted_jurisdiction(...)</code><code>set_jurisdiction(...)</code></div><div class="card-links"><span class="deployment">Testnet ID: <em>Not deployed</em></span><a href="https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/docs/interfaces/jurisdiction-flag.md">Interface →</a></div></article>
+          <article class="card contract-card"><div class="card-top"><span class="contract-index">07</span><span class="tag">Reference contract</span></div><h3>Multisig Admin</h3><p>M-of-N governance for protected administrative actions.</p><div class="fns"><code>propose(action)</code><code>approve(...)</code><code>execute(...)</code></div><div class="card-links"><span class="deployment">Testnet ID: <em>Not deployed</em></span><a href="https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/docs/interfaces/multisig-admin.md">Interface →</a></div></article>
+          <article class="card contract-card"><div class="card-top"><span class="contract-index">08</span><span class="tag">Library crate</span></div><h3>Pausable</h3><p>Shared pause and unpause helper used by compliance contracts.</p><div class="fns"><code>is_paused()</code><code>pause(admin)</code><code>unpause(admin)</code></div><div class="card-links"><span class="deployment">Testnet ID: <em>Library only</em></span><a href="https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/docs/interfaces/pausable.md">Interface →</a></div></article>
+          <article class="card contract-card"><div class="card-top"><span class="contract-index">09</span><span class="tag">Reference contract</span></div><h3>Policy Engine</h3><p>Evaluates configured denylist and jurisdiction checks as one policy.</p><div class="fns"><code>evaluate(from, to)</code><code>get_checks()</code></div><div class="card-links"><span class="deployment">Testnet ID: <em>Not deployed</em></span><a href="https://github.com/stellar-compliance-kit/compliance-primitives/blob/main/docs/interfaces/policy-engine.md">Interface →</a></div></article>
+        </div></div></section>
+    <section id="playground" class="playground-section"><div class="wrap"><div class="section-heading"><div><span class="eyebrow">INTERACTIVE WORKBENCH</span><h2>Freighter testnet playground</h2></div><p>Connect a Freighter wallet, choose a deployed contract, and simulate one of its read-only entrypoints.</p></div><div class="playground-grid"><div class="card form-card"><div class="wallet-row"><div><div class="eyebrow">WALLET</div><strong id="wallet-address">Not connected</strong></div><button class="btn btn-primary" id="connect-wallet">Connect Freighter</button></div><div id="wallet-status" class="status info">Use Freighter on Stellar Testnet to begin.</div><label for="contract-select">Contract</label><select id="contract-select"><option value="allowlist-token">allowlist-token · is_allowed</option><option value="denylist-gate">denylist-gate · check</option><option value="jurisdiction-flag">jurisdiction-flag · is_permitted_jurisdiction</option></select><label for="contract-id">Testnet contract ID</label><input id="contract-id" placeholder="C..." autocomplete="off" /><p class="field-help">IDs are editable so this page remains useful after a testnet reset or redeployment.</p><label for="query-address">Address to check</label><input id="query-address" placeholder="G..." autocomplete="off" /><div id="jurisdiction-fields" class="hidden"><label for="allowed-codes">Allowed jurisdiction codes</label><input id="allowed-codes" value="US,GB,EU" placeholder="US,GB,EU" /></div><button class="btn btn-primary run-button" id="run-query">Simulate read-only call</button></div><div class="card result-card"><div class="result-header"><div><div class="eyebrow">SIMULATION RESULT</div><h3 id="result-title">Ready when you are</h3></div><span class="tag">TESTNET</span></div><pre id="result-output" class="result-output">Connect Freighter, enter a deployed contract ID, and run a read-only check.</pre><div class="callout"><strong>No transaction will be submitted.</strong> Soroban RPC simulates the invocation against the current testnet state.</div></div></div></div></section>
+    <section class="how-section"><div class="wrap"><div class="section-heading"><div><span class="eyebrow">HOW IT WORKS</span><h2>Three steps, no signing prompt</h2></div></div><div class="steps"><div class="step"><span>01</span><h3>Connect</h3><p>Authorize this page in Freighter and confirm that the wallet is on Stellar Testnet.</p></div><div class="step"><span>02</span><h3>Configure</h3><p>Choose a contract, paste its deployed testnet ID, and provide the address and optional jurisdiction codes.</p></div><div class="step"><span>03</span><h3>Simulate</h3><p>Build a contract invocation locally and read the returned Soroban value from RPC simulation.</p></div></div></div></section>
+  </main>
+  <footer><div class="wrap foot-row"><span>Open-source compliance building blocks for Stellar.</span><span><a href="https://github.com/stellar-compliance-kit/compliance-primitives" target="_blank" rel="noreferrer">Source</a> · <a href="https://developers.stellar.org/docs/build/guides/freighter" target="_blank" rel="noreferrer">Freighter docs</a></span></div></footer>
+  <script>
+    const TESTNET_RPC = "https://soroban-testnet.stellar.org";
+    const $ = (selector) => document.querySelector(selector);
+    const contractSelect = $("#contract-select");
+    const jurisdictionFields = $("#jurisdiction-fields");
+    const walletStatus = $("#wallet-status");
+    let walletAddress = "";
+    function setStatus(message, kind = "info") { walletStatus.textContent = message; walletStatus.className = `status ${kind}`; }
+    function setResult(title, value) { $("#result-title").textContent = title; $("#result-output").textContent = typeof value === "string" ? value : JSON.stringify(value, (_, v) => typeof v === "bigint" ? v.toString() : v, 2); }
+    function updateFields() { jurisdictionFields.classList.toggle("hidden", contractSelect.value !== "jurisdiction-flag"); }
+    contractSelect.addEventListener("change", updateFields); updateFields();
+    $("#connect-wallet").addEventListener("click", async () => {
+      try {
+        if (!window.freighterApi) throw new Error("Freighter was not detected. Install the extension and reload this page.");
+        const access = await window.freighterApi.requestAccess();
+        if (access.error) throw new Error(access.error.message || "Freighter access was not granted.");
+        walletAddress = access.address;
+        const network = await window.freighterApi.getNetworkDetails();
+        if (network.error) throw new Error(network.error.message);
+        if (network.network !== "TESTNET") throw new Error(`Freighter is connected to ${network.network}. Switch it to TESTNET and try again.`);
+        $("#wallet-address").textContent = `${walletAddress.slice(0, 6)}…${walletAddress.slice(-6)}`;
+        $("#query-address").value = walletAddress;
+        setStatus("Connected to Freighter on Stellar Testnet.", "success");
+      } catch (error) { setStatus(error.message || String(error), "error"); }
+    });
+    $("#run-query").addEventListener("click", async () => {
+      const contractId = $("#contract-id").value.trim(); const address = $("#query-address").value.trim() || walletAddress; const selected = contractSelect.value;
+      if (!walletAddress) return setResult("Connect Freighter first", "No wallet is connected.");
+      if (!/^C[A-Z2-7]{55}$/.test(contractId)) return setResult("Contract ID required", "Paste a valid deployed testnet contract ID.");
+      if (!/^G[A-Z2-7]{55}$/.test(address)) return setResult("Address required", "Enter a valid Stellar G-address to check.");
+      const method = selected === "allowlist-token" ? "is_allowed" : selected === "denylist-gate" ? "check" : "is_permitted_jurisdiction";
+      setResult(`Simulating ${method}…`, "Contacting Soroban RPC…");
+      try {
+        const StellarSdk = await import("https://esm.sh/@stellar/stellar-sdk@14.2.0");
+        const args = [StellarSdk.nativeToScVal(address, { type: "address" })];
+        if (selected === "jurisdiction-flag") args.push(StellarSdk.nativeToScVal($("#allowed-codes").value.split(",").map((code) => code.trim()).filter(Boolean), { type: "vec" }));
+        const rpc = new StellarSdk.rpc.Server(TESTNET_RPC); const account = await rpc.getAccount(walletAddress);
+        const transaction = new StellarSdk.TransactionBuilder(account, { fee: StellarSdk.BASE_FEE, networkPassphrase: StellarSdk.Networks.TESTNET }).addOperation(StellarSdk.Operation.invokeContractFunction({ contract: contractId, function: method, args })).setTimeout(30).build();
+        const simulation = await rpc.simulateTransaction(transaction);
+        if (StellarSdk.rpc.Api.isSimulationError(simulation)) throw new Error(simulation.error || "The contract rejected the simulated call.");
+        const value = simulation.result?.retval === undefined ? simulation : StellarSdk.scValToNative(simulation.result.retval);
+        setResult(`${method}() result`, { contract: contractId, address, value });
+      } catch (error) { setResult("Simulation failed", error.message || String(error)); }
+    });
+  </script>
+</body>
+</html>

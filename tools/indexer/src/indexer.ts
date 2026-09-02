@@ -58,11 +58,20 @@ export class Indexer {
     }
   }
 
+  /** Run one poll cycle; useful for deterministic integration tests and operators. */
+  async pollOnce(): Promise<void> {
+    await this.poll();
+  }
+
   private async poll(): Promise<void> {
     const contractIds = [
       this.config.allowlistContractId,
       this.config.denylistContractId,
       this.config.jurisdictionContractId,
+      this.config.multisigContractId,
+      this.config.aggregatorContractId,
+      this.config.policyEngineContractId,
+      this.config.circuitBreakerContractId,
     ].filter(Boolean);
 
     if (contractIds.length === 0) {

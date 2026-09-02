@@ -9,6 +9,30 @@ enum DataKey {
     Frozen,
 }
 
+// ---------------------------------------------------------------------------
+// Events
+// ---------------------------------------------------------------------------
+
+mod events {
+    use soroban_sdk::{symbol_short, Env};
+
+    /// Emitted when the circuit breaker is activated (contract frozen).
+    ///
+    /// topics : [Symbol("Frozen")]
+    /// data   : Void
+    pub fn frozen(env: &Env) {
+        env.events().publish((symbol_short!("Frozen"),), ());
+    }
+
+    /// Emitted when the circuit breaker is deactivated (contract unfrozen).
+    ///
+    /// topics : [Symbol("Unfrozen")]
+    /// data   : Void
+    pub fn unfrozen(env: &Env) {
+        env.events().publish((symbol_short!("Unfrozen"),), ());
+    }
+}
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -36,12 +60,14 @@ impl CircuitBreaker {
     pub fn freeze(env: Env, admin: Address) -> Result<(), Error> {
         Self::require_admin(&env, &admin)?;
         env.storage().instance().set(&DataKey::Frozen, &true);
+        events::frozen(&env);
         Ok(())
     }
 
     pub fn unfreeze(env: Env, admin: Address) -> Result<(), Error> {
         Self::require_admin(&env, &admin)?;
         env.storage().instance().set(&DataKey::Frozen, &false);
+        events::unfrozen(&env);
         Ok(())
     }
 
