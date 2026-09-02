@@ -35,6 +35,7 @@ Both are covered in this guide with concrete worked examples.
   - [Pattern B: Cross-contract composition](#pattern-b-cross-contract-composition)
 - [Step 4: Data backfill](#step-4-data-backfill)
 - [Step 5: Rollback plan](#step-5-rollback-plan)
+- [Consolidating hand-wired composition into `policy-engine`](#consolidating-hand-wired-composition-into-policy-engine)
 - [Worked example: `mapping(address => bool) allowed` → `allowlist-token`](#worked-example-mappingaddress--bool-allowed--allowlist-token)
 - [Testing your migration](#testing-your-migration)
 
@@ -462,6 +463,158 @@ behaviour, performance issues), you need a path back.
    ```
    This lets transfers resume immediately while you debug the original
    gate.
+
+---
+
+## Consolidating hand-wired composition into `policy-engine`
+
+**Who this section is for:** you already followed [Pattern B: Cross-contract
+composition](#pattern-b-cross-contract-composition) above — your token's
+`transfer` declares two `#[contractclient]` traits and calls
+`denylist-gate` and `jurisdiction-flag` directly with two sequential `if`
+checks — and you want the same AND-combined compliance decision with less
+integration code sitting inside your token contract.
+[`policy-engine`](../contracts/policy-engine) replaces both client traits
+and both inline checks with a single cross-contract call; it doesn't
+replace your `denylist-gate`/`jurisdiction-flag` deployments, it composes
+them.
+
+### Before: hand-wired composition
+
+This is the code from [Step 3, Pattern
+B](#pattern-b-cross-contract-composition) above:
+
+```rust
+#[contractclient(name = "GateClient")]
+pub trait DenylistGateInterface {
+    fn check(env: Env, address: Address) -> bool;
+}
+
+#[contractclient(name = "JurisdictionClient")]
+pub trait JurisdictionFlagInterface {
+    fn is_permitted_jurisdiction(env: Env, address: Address, allowed_codes: Vec<String>) -> bool;
+}
+
+fn transfer(env: Env, from: Address, to: Address, amount: i128) -> Result<(), Error> {
+    from.require_auth();
+
+    let gate_addr: Address = env.storage().instance()
+        .get(&DataKey::DenylistGate)
+        .ok_or(Error::NotInitialized)?;
+    let gate = GateClient::new(&env, &gate_addr);
+    if !gate.check(&from) || !gate.check(&to) {
+        return Err(Error::DeniedByGate);
+    }
+
+    let jurisdiction_addr: Address = env.storage().instance()
+        .get(&DataKey::JurisdictionFlag)
+        .ok_or(Error::NotInitialized)?;
+    let jurisdiction = JurisdictionClient::new(&env, &jurisdiction_addr);
+    let allowed = Self::permitted_jurisdictions(env.clone());
+    if !jurisdiction.is_permitted_jurisdiction(&from, &allowed)
+        || !jurisdiction.is_permitted_jurisdiction(&to, &allowed)
+    {
+        return Err(Error::JurisdictionNotPermitted);
+    }
+
+    // … existing balance checks & transfer logic …
+}
+```
+
+Two stored addresses, two client traits, and both checks re-implemented by
+hand for every consuming token.
+
+### After: `policy-engine`
+
+**1. Deploy `policy-engine` once.** It calls your existing `denylist-gate`
+and `jurisdiction-flag` instances — you keep those deployments as-is:
+
+```sh
+POLICY_ID=$(stellar contract deploy \
+  --wasm target/wasm32v1-none/release/policy_engine.wasm \
+  --source testnet-admin \
+  --network testnet)
+
+stellar contract invoke \
+  --id "$POLICY_ID" \
+  --source testnet-admin \
+  --network testnet \
+  -- initialize \
+  --admin <your-admin-address> \
+  --op All
+```
+
+`--op All` is the AND semantics your hand-wired `if !gate.check(...) ||
+!jurisdiction...` code implemented manually — every registered check must
+pass.
+
+**2. Register the two checks you were previously calling by hand:**
+
+```sh
+stellar contract invoke --id "$POLICY_ID" --source testnet-admin --network testnet \
+  -- add_check --admin <your-admin-address> \
+  --check '{"Denylist":{"contract":"'"$DENYLIST_ID"'"}}'
+
+stellar contract invoke --id "$POLICY_ID" --source testnet-admin --network testnet \
+  -- add_check --admin <your-admin-address> \
+  --check '{"Jurisdiction":{"contract":"'"$JURISDICTION_ID"'","allowed_codes":["US","CA","GB"]}}'
+```
+
+**3. Replace both client traits and both `if` checks with one call:**
+
+```rust
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum PolicyEngineError {
+    NotInitialized = 1,
+    AlreadyInitialized = 2,
+    NotAuthorized = 3,
+    PolicyViolation = 4,
+}
+
+#[contractclient(name = "PolicyEngineClient")]
+pub trait PolicyEngineInterface {
+    fn evaluate(env: Env, from: Address, to: Address) -> Result<bool, PolicyEngineError>;
+}
+
+fn transfer(env: Env, from: Address, to: Address, amount: i128) -> Result<(), Error> {
+    from.require_auth();
+
+    let policy_addr: Address = env.storage().instance()
+        .get(&DataKey::PolicyEngine)
+        .ok_or(Error::NotInitialized)?;
+    let policy = PolicyEngineClient::new(&env, &policy_addr);
+    if !policy.evaluate(&from, &to) {
+        return Err(Error::PolicyViolation);
+    }
+
+    // … existing balance checks & transfer logic …
+}
+```
+
+`evaluate` runs every registered check against both `from` and `to` and
+combines the results with the configured `CombineOp`, same as the hand-wired
+version — but adding a third check (say, a second `denylist-gate` instance,
+or swapping the combine operator to `Any`) is now an `add_check` /
+re-`initialize` admin call against `policy-engine`, not a code change and
+redeploy of your token.
+
+**Trade-off to know before you migrate:** the hand-wired version's two
+distinct errors (`DeniedByGate` vs. `JurisdictionNotPermitted`) become one
+`PolicyViolation`, and `policy-engine`'s `PolicyResult` event carries
+`passed`/`from`/`to` but not *which* registered check failed. If your
+off-chain tooling depends on knowing which specific check rejected a
+transfer, keep that in mind — everything downstream of `evaluate` sees a
+single pass/fail decision.
+
+**4. Update your rollback plan.** The [Pattern B rollback
+steps](#pattern-b-rollback-cross-contract-composition) still apply, but
+now point at `policy-engine`'s stored addresses: pointing your token at a
+freshly-deployed, empty-checks `policy-engine` instance (`op: All`, no
+`add_check` calls yet — `evaluate` returns `Ok(true)` with no checks
+registered under `All`) is the equivalent emergency bypass to deploying an
+empty `denylist-gate`.
 
 ---
 
