@@ -249,7 +249,7 @@ impl JurisdictionFlag {
         match Self::get_jurisdiction(env, address) {
             Some(code) => allowed_codes.iter().any(|c| c == code),
             None => false,
-        })
+        }
     }
 
     /// Upgrade the contract to a new implementation. Issuer-only.

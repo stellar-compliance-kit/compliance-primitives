@@ -1,6 +1,7 @@
 use super::*;
-use denylist_gate::{DenylistGate, DenylistGateClient};
-use jurisdiction_flag::{JurisdictionFlag, JurisdictionFlagClient};
+use crate::test_utils::{
+    MockDenylist, MockDenylistClient, MockJurisdiction, MockJurisdictionClient,
+};
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{vec, Env, String};
 
@@ -8,18 +9,14 @@ use soroban_sdk::{vec, Env, String};
 // Test helpers
 // ---------------------------------------------------------------------------
 
-/// Registers and initialises a denylist-gate contract, returns its address.
-fn setup_denylist(env: &Env, admin: &Address) -> Address {
-    let id = env.register(DenylistGate, ());
-    DenylistGateClient::new(env, &id).initialize(admin);
-    id
+/// Registers a mock denylist contract, returns its address.
+fn setup_denylist(env: &Env) -> Address {
+    env.register(MockDenylist, ())
 }
 
-/// Registers and initialises a jurisdiction-flag contract, returns its address.
-fn setup_jurisdiction(env: &Env, issuer: &Address) -> Address {
-    let id = env.register(JurisdictionFlag, ());
-    JurisdictionFlagClient::new(env, &id).initialize(issuer);
-    id
+/// Registers a mock jurisdiction contract, returns its address.
+fn setup_jurisdiction(env: &Env) -> Address {
+    env.register(MockJurisdiction, ())
 }
 
 /// Registers and initialises a policy-engine contract with `All` semantics,
@@ -52,35 +49,31 @@ fn test_all_checks_pass() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let deny_admin = Address::generate(&env);
-    let juri_issuer = Address::generate(&env);
-    let deny_id = setup_denylist(&env, &deny_admin);
-    let juri_id = setup_jurisdiction(&env, &juri_issuer);
+    let deny_id = setup_denylist(&env);
+    let juri_id = setup_jurisdiction(&env);
 
     let from = Address::generate(&env);
     let to = Address::generate(&env);
 
     // Set permitted jurisdictions for both addresses.
     let code_us = String::from_str(&env, "US");
-    JurisdictionFlagClient::new(&env, &juri_id)
-        .set_jurisdiction(&juri_issuer, &from, &code_us);
-    JurisdictionFlagClient::new(&env, &juri_id)
-        .set_jurisdiction(&juri_issuer, &to, &code_us);
+    MockJurisdictionClient::new(&env, &juri_id).set_jurisdiction(&from, &code_us);
+    MockJurisdictionClient::new(&env, &juri_id).set_jurisdiction(&to, &code_us);
 
     let (admin, _engine_id, client) = setup_engine_all(&env);
 
     client.add_check(
         &admin,
-        &CheckKind::Denylist {
+        &CheckKind::Denylist(DenylistCheck {
             contract: deny_id.clone(),
-        },
+        }),
     );
     client.add_check(
         &admin,
-        &CheckKind::Jurisdiction {
+        &CheckKind::Jurisdiction(JurisdictionCheck {
             contract: juri_id.clone(),
             allowed_codes: vec![&env, String::from_str(&env, "US")],
-        },
+        }),
     );
 
     let result = client.evaluate(&from, &to);
@@ -94,38 +87,34 @@ fn test_one_check_fails_and_semantics() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let deny_admin = Address::generate(&env);
-    let juri_issuer = Address::generate(&env);
-    let deny_id = setup_denylist(&env, &deny_admin);
-    let juri_id = setup_jurisdiction(&env, &juri_issuer);
+    let deny_id = setup_denylist(&env);
+    let juri_id = setup_jurisdiction(&env);
 
     let from = Address::generate(&env);
     let to = Address::generate(&env);
 
     // Both addresses have valid jurisdiction codes.
     let code_us = String::from_str(&env, "US");
-    JurisdictionFlagClient::new(&env, &juri_id)
-        .set_jurisdiction(&juri_issuer, &from, &code_us);
-    JurisdictionFlagClient::new(&env, &juri_id)
-        .set_jurisdiction(&juri_issuer, &to, &code_us);
+    MockJurisdictionClient::new(&env, &juri_id).set_jurisdiction(&from, &code_us);
+    MockJurisdictionClient::new(&env, &juri_id).set_jurisdiction(&to, &code_us);
 
     // But `from` is denied.
-    DenylistGateClient::new(&env, &deny_id).add_to_denylist(&deny_admin, &from);
+    MockDenylistClient::new(&env, &deny_id).add_to_denylist(&from);
 
     let (admin, _engine_id, client) = setup_engine_all(&env);
 
     client.add_check(
         &admin,
-        &CheckKind::Denylist {
+        &CheckKind::Denylist(DenylistCheck {
             contract: deny_id.clone(),
-        },
+        }),
     );
     client.add_check(
         &admin,
-        &CheckKind::Jurisdiction {
+        &CheckKind::Jurisdiction(JurisdictionCheck {
             contract: juri_id.clone(),
             allowed_codes: vec![&env, String::from_str(&env, "US")],
-        },
+        }),
     );
 
     let result = client.evaluate(&from, &to);
@@ -140,39 +129,35 @@ fn test_one_check_passes_or_semantics() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let deny_admin = Address::generate(&env);
-    let juri_issuer = Address::generate(&env);
-    let deny_id = setup_denylist(&env, &deny_admin);
-    let juri_id = setup_jurisdiction(&env, &juri_issuer);
+    let deny_id = setup_denylist(&env);
+    let juri_id = setup_jurisdiction(&env);
 
     let from = Address::generate(&env);
     let to = Address::generate(&env);
 
     // Both addresses are on the denylist (denylist check will fail).
-    DenylistGateClient::new(&env, &deny_id).add_to_denylist(&deny_admin, &from);
-    DenylistGateClient::new(&env, &deny_id).add_to_denylist(&deny_admin, &to);
+    MockDenylistClient::new(&env, &deny_id).add_to_denylist(&from);
+    MockDenylistClient::new(&env, &deny_id).add_to_denylist(&to);
 
     // But both have valid jurisdiction codes (jurisdiction check will pass).
     let code_us = String::from_str(&env, "US");
-    JurisdictionFlagClient::new(&env, &juri_id)
-        .set_jurisdiction(&juri_issuer, &from, &code_us);
-    JurisdictionFlagClient::new(&env, &juri_id)
-        .set_jurisdiction(&juri_issuer, &to, &code_us);
+    MockJurisdictionClient::new(&env, &juri_id).set_jurisdiction(&from, &code_us);
+    MockJurisdictionClient::new(&env, &juri_id).set_jurisdiction(&to, &code_us);
 
     let (admin, _engine_id, client) = setup_engine_any(&env);
 
     client.add_check(
         &admin,
-        &CheckKind::Denylist {
+        &CheckKind::Denylist(DenylistCheck {
             contract: deny_id.clone(),
-        },
+        }),
     );
     client.add_check(
         &admin,
-        &CheckKind::Jurisdiction {
+        &CheckKind::Jurisdiction(JurisdictionCheck {
             contract: juri_id.clone(),
             allowed_codes: vec![&env, String::from_str(&env, "US")],
-        },
+        }),
     );
 
     // With Any: the jurisdiction check passes for both → result is true.
@@ -186,8 +171,7 @@ fn test_add_and_remove_check() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let deny_admin = Address::generate(&env);
-    let deny_id = setup_denylist(&env, &deny_admin);
+    let deny_id = setup_denylist(&env);
 
     let (admin, _engine_id, client) = setup_engine_all(&env);
 
@@ -197,21 +181,20 @@ fn test_add_and_remove_check() {
     // Add one check.
     client.add_check(
         &admin,
-        &CheckKind::Denylist {
+        &CheckKind::Denylist(DenylistCheck {
             contract: deny_id.clone(),
-        },
+        }),
     );
     assert_eq!(client.get_checks().len(), 1);
 
     // Add a second check.
-    let juri_issuer = Address::generate(&env);
-    let juri_id = setup_jurisdiction(&env, &juri_issuer);
+    let juri_id = setup_jurisdiction(&env);
     client.add_check(
         &admin,
-        &CheckKind::Jurisdiction {
+        &CheckKind::Jurisdiction(JurisdictionCheck {
             contract: juri_id.clone(),
             allowed_codes: vec![&env, String::from_str(&env, "US")],
-        },
+        }),
     );
     assert_eq!(client.get_checks().len(), 2);
 
@@ -220,281 +203,35 @@ fn test_add_and_remove_check() {
     assert_eq!(client.get_checks().len(), 1);
 }
 
-// ---------------------------------------------------------------------------
-// batch_evaluate tests
-// ---------------------------------------------------------------------------
-
-/// batch_evaluate with All semantics: results must match individual evaluate()
-/// calls for the same addresses (each address evaluated against itself as both
-/// from and to, which is how run_check is applied per address in the batch).
+/// add_check must return MaxDepthExceeded once MAX_CHECKS is reached.
 #[test]
-fn test_batch_evaluate_matches_individual_evaluate() {
+fn test_max_depth_exceeded() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let deny_admin = Address::generate(&env);
-    let juri_issuer = Address::generate(&env);
-    let deny_id = setup_denylist(&env, &deny_admin);
-    let juri_id = setup_jurisdiction(&env, &juri_issuer);
-
-    // alice: clear denylist, has US jurisdiction → should pass
-    // bob: on denylist, has US jurisdiction → should fail (All semantics)
-    // carol: clear denylist, no jurisdiction → should fail
-    let alice = Address::generate(&env);
-    let bob = Address::generate(&env);
-    let carol = Address::generate(&env);
-
-    let code_us = String::from_str(&env, "US");
-    JurisdictionFlagClient::new(&env, &juri_id)
-        .set_jurisdiction(&juri_issuer, &alice, &code_us);
-    JurisdictionFlagClient::new(&env, &juri_id)
-        .set_jurisdiction(&juri_issuer, &bob, &code_us);
-    DenylistGateClient::new(&env, &deny_id).add_to_denylist(&deny_admin, &bob);
-
+    let deny_id = setup_denylist(&env);
     let (admin, _engine_id, client) = setup_engine_all(&env);
-    client.add_check(
-        &admin,
-        &CheckKind::Denylist {
-            contract: deny_id.clone(),
-        },
-    );
-    client.add_check(
-        &admin,
-        &CheckKind::Jurisdiction {
-            contract: juri_id.clone(),
-            allowed_codes: vec![&env, String::from_str(&env, "US")],
-        },
-    );
 
-    // Run batch_evaluate.
-    let addresses = vec![&env, alice.clone(), bob.clone(), carol.clone()];
-    let batch_results = client.batch_evaluate(&addresses);
-    assert_eq!(batch_results.len(), 3);
-
-    // Compare each batch result against the equivalent individual evaluate()
-    // call (each address evaluated as both from and to).
-    let individual_alice = client.evaluate(&alice, &alice);
-    let individual_bob = client.evaluate(&bob, &bob);
-    let individual_carol = client.evaluate(&carol, &carol);
-
-    assert_eq!(batch_results.get(0).unwrap(), individual_alice);
-    assert_eq!(batch_results.get(1).unwrap(), individual_bob);
-    assert_eq!(batch_results.get(2).unwrap(), individual_carol);
-
-    // Sanity-check the expected values explicitly.
-    assert!(batch_results.get(0).unwrap()); // alice passes
-    assert!(!batch_results.get(1).unwrap()); // bob fails (denied)
-    assert!(!batch_results.get(2).unwrap()); // carol fails (no jurisdiction)
-}
-
-/// batch_evaluate with Any semantics: each address only needs to satisfy one
-/// check. Results must again match calling evaluate() individually.
-#[test]
-fn test_batch_evaluate_any_semantics_matches_individual() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let deny_admin = Address::generate(&env);
-    let juri_issuer = Address::generate(&env);
-    let deny_id = setup_denylist(&env, &deny_admin);
-    let juri_id = setup_jurisdiction(&env, &juri_issuer);
-
-    // dave: on denylist, but has US jurisdiction → passes (Any: jurisdiction check wins)
-    // eve: on denylist, no jurisdiction → fails (Any: neither check passes)
-    let dave = Address::generate(&env);
-    let eve = Address::generate(&env);
-
-    let code_us = String::from_str(&env, "US");
-    DenylistGateClient::new(&env, &deny_id).add_to_denylist(&deny_admin, &dave);
-    JurisdictionFlagClient::new(&env, &juri_id)
-        .set_jurisdiction(&juri_issuer, &dave, &code_us);
-    DenylistGateClient::new(&env, &deny_id).add_to_denylist(&deny_admin, &eve);
-
-    let (admin, _engine_id, client) = setup_engine_any(&env);
-    client.add_check(
-        &admin,
-        &CheckKind::Denylist {
-            contract: deny_id.clone(),
-        },
-    );
-    client.add_check(
-        &admin,
-        &CheckKind::Jurisdiction {
-            contract: juri_id.clone(),
-            allowed_codes: vec![&env, String::from_str(&env, "US")],
-        },
-    );
-
-    let addresses = vec![&env, dave.clone(), eve.clone()];
-    let batch_results = client.batch_evaluate(&addresses);
-    assert_eq!(batch_results.len(), 2);
-
-    let individual_dave = client.evaluate(&dave, &dave);
-    let individual_eve = client.evaluate(&eve, &eve);
-
-    assert_eq!(batch_results.get(0).unwrap(), individual_dave);
-    assert_eq!(batch_results.get(1).unwrap(), individual_eve);
-
-    assert!(batch_results.get(0).unwrap()); // dave passes via jurisdiction
-    assert!(!batch_results.get(1).unwrap()); // eve fails both checks
-}
-
-/// batch_evaluate must return BatchTooLarge when the list exceeds MAX_BATCH_SIZE.
-#[test]
-fn test_batch_evaluate_too_large() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let (_, _, client) = setup_engine_all(&env);
-
-    // Build a list with MAX_BATCH_SIZE + 1 addresses.
-    let mut addresses: Vec<Address> = Vec::new(&env);
-    for _ in 0..=MAX_BATCH_SIZE {
-        addresses.push_back(Address::generate(&env));
+    // Fill up to the limit.
+    for _ in 0..MAX_CHECKS {
+        client.add_check(
+            &admin,
+            &CheckKind::Denylist(DenylistCheck {
+                contract: deny_id.clone(),
+            }),
+        );
     }
+    assert_eq!(client.get_checks().len(), MAX_CHECKS);
 
-    let result = client.try_batch_evaluate(&addresses);
-    assert_eq!(result, Err(Ok(Error::BatchTooLarge)));
-}
-
-/// batch_evaluate with exactly MAX_BATCH_SIZE addresses must succeed.
-#[test]
-fn test_batch_evaluate_at_limit_succeeds() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let (_, _, client) = setup_engine_all(&env);
-
-    let mut addresses: Vec<Address> = Vec::new(&env);
-    for _ in 0..MAX_BATCH_SIZE {
-        addresses.push_back(Address::generate(&env));
-    }
-
-    // No checks registered — All semantics with zero checks returns true for every address.
-    let results = client.batch_evaluate(&addresses);
-    assert_eq!(results.len(), MAX_BATCH_SIZE);
-}
-
-// ---------------------------------------------------------------------------
-// Pausable tests
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_is_paused_defaults_to_false() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (_, _engine_id, client) = setup_engine_all(&env);
-    assert!(!client.is_paused());
-}
-
-#[test]
-fn test_pause_and_unpause() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (admin, _engine_id, client) = setup_engine_all(&env);
-
-    client.pause(&admin);
-    assert!(client.is_paused());
-
-    client.unpause(&admin);
-    assert!(!client.is_paused());
-}
-
-#[test]
-fn test_add_check_rejected_while_paused() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (admin, _engine_id, client) = setup_engine_all(&env);
-
-    let deny_admin = Address::generate(&env);
-    let deny_id = setup_denylist(&env, &deny_admin);
-
-    client.pause(&admin);
-
+    // One more must fail with MaxDepthExceeded.
     let result = client.try_add_check(
         &admin,
-        &CheckKind::Denylist {
+        &CheckKind::Denylist(DenylistCheck {
             contract: deny_id.clone(),
-        },
+        }),
     );
-    assert_eq!(result, Err(Ok(Error::ContractPaused)));
-}
-
-#[test]
-fn test_remove_check_rejected_while_paused() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (admin, _engine_id, client) = setup_engine_all(&env);
-
-    let deny_admin = Address::generate(&env);
-    let deny_id = setup_denylist(&env, &deny_admin);
-
-    client.add_check(
-        &admin,
-        &CheckKind::Denylist {
-            contract: deny_id.clone(),
-        },
+    assert!(
+        matches!(result, Err(Ok(Error::MaxDepthExceeded))),
+        "expected MaxDepthExceeded, got {result:?}"
     );
-
-    client.pause(&admin);
-
-    let result = client.try_remove_check(&admin, &0);
-    assert_eq!(result, Err(Ok(Error::ContractPaused)));
-}
-
-#[test]
-fn test_mutations_succeed_after_unpause() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (admin, _engine_id, client) = setup_engine_all(&env);
-
-    let deny_admin = Address::generate(&env);
-    let deny_id = setup_denylist(&env, &deny_admin);
-
-    client.pause(&admin);
-    client.unpause(&admin);
-
-    client.add_check(
-        &admin,
-        &CheckKind::Denylist {
-            contract: deny_id.clone(),
-        },
-    );
-    assert_eq!(client.get_checks().len(), 1);
-}
-
-#[test]
-fn test_read_methods_succeed_while_paused() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (admin, _engine_id, client) = setup_engine_all(&env);
-
-    let deny_admin = Address::generate(&env);
-    let deny_id = setup_denylist(&env, &deny_admin);
-
-    client.add_check(
-        &admin,
-        &CheckKind::Denylist {
-            contract: deny_id.clone(),
-        },
-    );
-
-    client.pause(&admin);
-
-    let checks = client.get_checks();
-    assert_eq!(checks.len(), 1);
-
-    let op = client.get_op();
-    assert_eq!(op.unwrap(), CombineOp::All);
-}
-
-#[test]
-fn test_non_admin_cannot_pause() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (_, _engine_id, client) = setup_engine_all(&env);
-
-    let non_admin = Address::generate(&env);
-    let result = client.try_pause(&non_admin);
-    assert_eq!(result, Err(Ok(Error::NotAuthorized)));
 }

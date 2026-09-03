@@ -60,23 +60,40 @@ pub trait JurisdictionCheckInterface {
 // Storage types
 // ---------------------------------------------------------------------------
 
+/// Parameters for a denylist check.
+#[contracttype]
+#[derive(Clone)]
+pub struct DenylistCheck {
+    /// Address of the deployed `denylist-gate` contract to call.
+    pub contract: Address,
+}
+
+/// Parameters for a jurisdiction check.
+#[contracttype]
+#[derive(Clone)]
+pub struct JurisdictionCheck {
+    /// Address of the deployed `jurisdiction-flag` contract to call.
+    pub contract: Address,
+    /// Jurisdiction codes that the checked address must belong to.
+    pub allowed_codes: Vec<String>,
+}
+
 /// Describes a single compliance check the engine should perform.
 ///
-/// Each variant carries the address of the external contract that implements
-/// the check plus any parameters that check needs.
+/// Each variant wraps a parameter struct carrying the address of the external
+/// contract and any extra parameters the check needs. Tuple variants are
+/// used because `#[contracttype]` does not support named struct-like enum
+/// variants.
 #[contracttype]
 #[derive(Clone)]
 pub enum CheckKind {
     /// Call `denylist-gate.check(address)`. The address must **not** be on
     /// the denylist for this check to pass.
-    Denylist { contract: Address },
+    Denylist(DenylistCheck),
     /// Call `jurisdiction-flag.is_permitted_jurisdiction(address,
     /// allowed_codes)`. The address must have a jurisdiction code in
     /// `allowed_codes` for this check to pass.
-    Jurisdiction {
-        contract: Address,
-        allowed_codes: Vec<String>,
-    },
+    Jurisdiction(JurisdictionCheck),
 }
 
 /// How the engine combines the results of multiple checks.
@@ -121,10 +138,17 @@ pub enum Error {
     AlreadyInitialized = 2,
     NotAuthorized = 3,
     PolicyViolation = 4,
-    /// `batch_evaluate` was called with more than `MAX_BATCH_SIZE` addresses.
-    BatchTooLarge = 5,
-    ContractPaused = 6,
+    /// Returned by `add_check` when the number of registered checks would
+    /// exceed `MAX_CHECKS`. Keeps per-evaluation resource cost bounded and
+    /// prevents unbounded storage growth.
+    MaxDepthExceeded = 5,
 }
+
+/// Maximum number of checks that can be registered in a single policy
+/// engine instance.  Chosen to keep per-`evaluate` cross-contract call
+/// overhead well within Soroban's instruction limits while still supporting
+/// all realistic compliance stack sizes.
+pub const MAX_CHECKS: u32 = 16;
 
 /// Emitted by `evaluate` regardless of the pass/fail outcome so that
 /// off-chain compliance tooling can build a full audit trail even when the
@@ -202,6 +226,10 @@ impl PolicyEngine {
     // -----------------------------------------------------------------------
 
     /// Append a new `check` to the end of the policy list. Admin-only.
+    ///
+    /// Returns `Err(Error::MaxDepthExceeded)` if the list already contains
+    /// `MAX_CHECKS` entries. This keeps the number of cross-contract calls
+    /// issued by `evaluate` bounded and prevents storage bloat.
     pub fn add_check(env: Env, admin: Address, check: CheckKind) -> Result<(), Error> {
         compliance_pausable::require_not_paused_or(&env, Error::ContractPaused)?;
         Self::require_admin(&env, &admin)?;
@@ -210,6 +238,9 @@ impl PolicyEngine {
             .instance()
             .get(&DataKey::Checks)
             .ok_or(Error::NotInitialized)?;
+        if checks.len() >= MAX_CHECKS {
+            return Err(Error::MaxDepthExceeded);
+        }
         checks.push_back(check);
         env.storage().instance().set(&DataKey::Checks, &checks);
         Ok(())
@@ -394,16 +425,13 @@ impl PolicyEngine {
 
     fn run_check(env: &Env, check: &CheckKind, address: &Address) -> bool {
         match check {
-            CheckKind::Denylist { contract } => {
-                let client = DenylistCheckClient::new(env, contract);
+            CheckKind::Denylist(d) => {
+                let client = DenylistCheckClient::new(env, &d.contract);
                 client.check(address)
             }
-            CheckKind::Jurisdiction {
-                contract,
-                allowed_codes,
-            } => {
-                let client = JurisdictionCheckClient::new(env, contract);
-                client.is_permitted_jurisdiction(address, allowed_codes)
+            CheckKind::Jurisdiction(j) => {
+                let client = JurisdictionCheckClient::new(env, &j.contract);
+                client.is_permitted_jurisdiction(address, &j.allowed_codes)
             }
         }
     }
@@ -423,4 +451,10 @@ impl PolicyEngine {
 }
 
 #[cfg(test)]
+mod test_utils;
+
+#[cfg(test)]
 mod test;
+
+#[cfg(test)]
+mod fuzz;
