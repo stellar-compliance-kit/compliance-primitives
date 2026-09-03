@@ -1,0 +1,11 @@
+import { readFile, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
+
+const root = resolve(new URL("..", import.meta.url).pathname);
+const web = resolve(root, "web");
+const escapeHtml = (value) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\"/g, "&quot;");
+const shell = (title, description, body) => `<!doctype html>\n<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title} — compliance-primitives</title><meta name="description" content="${description}"><link rel="icon" href="favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="styles.css"></head><body><nav><div class="wrap"><a class="brand" href="index.html">compliance-primitives</a><div class="nav-links"><a href="index.html#contracts">Contracts</a><a href="architecture.html">Architecture</a><a href="changelog.html">Changelog</a><a href="index.html">Home</a></div></div></nav>${body}<footer><div class="wrap"><div class="foot-row"><span>MIT License · Stellar compliance primitives</span><a href="https://github.com/stellar-compliance-kit/compliance-primitives">GitHub</a></div></div></footer></body></html>`;
+const changelog = await readFile(resolve(root, "CHANGELOG.md"), "utf8");
+const architecture = await readFile(resolve(root, "ARCHITECTURE.md"), "utf8");
+await writeFile(resolve(web, "changelog.html"), shell("Changelog", "Release history for compliance-primitives", `<main class="page wrap"><span class="badge">Release history</span><h1>Changelog</h1><p class="lede">A build-generated view of the repository changelog.</p><article class="markdown"><pre>${escapeHtml(changelog)}</pre></article></main>`));
+await writeFile(resolve(web, "architecture.html"), shell("Architecture", "Composition graph for the nine compliance-primitives contracts", `<main class="page wrap"><span class="badge">System design</span><h1>Contract architecture</h1><p class="lede">Nine focused Soroban contracts composed through explicit checks and administrative controls.</p><div class="diagram"><img src="architecture.svg" alt="Diagram showing the composition relationships between nine compliance contracts"></div><article class="markdown"><h2>Source architecture</h2><pre>${escapeHtml(architecture)}</pre></article></main>`));

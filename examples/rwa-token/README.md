@@ -5,9 +5,9 @@ one `transfer` path:
 
 | Order | Check | Primitive | Failure |
 | --- | --- | --- | --- |
-| 1 | Both parties allowlisted | `allowlist-token.is_allowed` | `Error::NotAllowlisted` |
-| 2 | Neither party denylisted | `denylist-gate.check` | `Error::DeniedByGate` |
-| 3 | Both parties permitted | `jurisdiction-flag.is_permitted_jurisdiction` | `Error::JurisdictionNotPermitted` |
+| 1 | Both parties allowlisted | [`allowlist-token`](../../contracts/allowlist-token).`is_allowed` | `Error::NotAllowlisted` |
+| 2 | Neither party denylisted | [`denylist-gate`](../../contracts/denylist-gate).`check` | `Error::DeniedByGate` |
+| 3 | Both parties permitted | [`jurisdiction-flag`](../../contracts/jurisdiction-flag).`is_permitted_jurisdiction` | `Error::JurisdictionNotPermitted` |
 
 Checks are fail-fast and return a dedicated error so integrators can tell
 which gate blocked the transfer.

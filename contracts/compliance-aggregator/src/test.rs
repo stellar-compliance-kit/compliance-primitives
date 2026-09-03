@@ -597,3 +597,97 @@ fn bench_batch_vs_individual_loop() {
         "Batch path CPU ({batch_cpu}) exceeds 4× the individual loop ({individual_cpu})"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Pausable tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_is_paused_defaults_to_false() {
+    let env = Env::default();
+    let (_, _, _, _, _, _, client) = setup_all(&env);
+    assert!(!client.is_paused());
+}
+
+#[test]
+fn test_pause_and_unpause() {
+    let env = Env::default();
+    let (_, _, _, _, agg_admin, _, client) = setup_all(&env);
+
+    client.pause(&agg_admin);
+    assert!(client.is_paused());
+
+    client.unpause(&agg_admin);
+    assert!(!client.is_paused());
+}
+
+#[test]
+fn test_set_admin_rejected_while_paused() {
+    let env = Env::default();
+    let (_, _, _, _, agg_admin, _, client) = setup_all(&env);
+
+    let new_admin = Address::generate(&env);
+    client.pause(&agg_admin);
+
+    let result = client.try_set_admin(&agg_admin, &new_admin);
+    assert_eq!(result, Err(Ok(Error::ContractPaused)));
+}
+
+#[test]
+fn test_set_denylist_gate_rejected_while_paused() {
+    let env = Env::default();
+    let (_, _, _, _, agg_admin, _, client) = setup_all(&env);
+
+    let new_gate = Address::generate(&env);
+    client.pause(&agg_admin);
+
+    let result = client.try_set_denylist_gate(&agg_admin, &new_gate);
+    assert_eq!(result, Err(Ok(Error::ContractPaused)));
+}
+
+#[test]
+fn test_set_jurisdiction_flag_rejected_while_paused() {
+    let env = Env::default();
+    let (_, _, _, _, agg_admin, _, client) = setup_all(&env);
+
+    let new_flag = Address::generate(&env);
+    client.pause(&agg_admin);
+
+    let result = client.try_set_jurisdiction_flag(&agg_admin, &new_flag);
+    assert_eq!(result, Err(Ok(Error::ContractPaused)));
+}
+
+#[test]
+fn test_mutations_succeed_after_unpause() {
+    let env = Env::default();
+    let (_, _, _, _, agg_admin, _, client) = setup_all(&env);
+
+    let new_admin = Address::generate(&env);
+    client.pause(&agg_admin);
+    client.unpause(&agg_admin);
+
+    client.set_admin(&agg_admin, &new_admin);
+    // Verify the admin changed
+    assert_ne!(client.denylist_gate(), Some(Address::generate(&env)));
+}
+
+#[test]
+fn test_read_methods_succeed_while_paused() {
+    let env = Env::default();
+    let (_, gate_id, _, flag_id, agg_admin, _, client) = setup_all(&env);
+
+    client.pause(&agg_admin);
+
+    assert_eq!(client.denylist_gate(), Some(gate_id));
+    assert_eq!(client.jurisdiction_flag(), Some(flag_id));
+}
+
+#[test]
+fn test_non_admin_cannot_pause() {
+    let env = Env::default();
+    let (_, _, _, _, _, _, client) = setup_all(&env);
+
+    let non_admin = Address::generate(&env);
+    let result = client.try_pause(&non_admin);
+    assert_eq!(result, Err(Ok(Error::NotAuthorized)));
+}
