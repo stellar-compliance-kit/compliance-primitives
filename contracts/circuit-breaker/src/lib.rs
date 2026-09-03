@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env};
+use soroban_sdk::{contract, contracterror, contractevent, contractimpl, contracttype, Address, Env};
 
 #[contracttype]
 #[derive(Clone)]
@@ -9,28 +9,16 @@ enum DataKey {
     Frozen,
 }
 
-// ---------------------------------------------------------------------------
-// Events
-// ---------------------------------------------------------------------------
+#[contractevent]
+pub struct Frozen {
+    #[topic]
+    pub admin: Address,
+}
 
-mod events {
-    use soroban_sdk::{symbol_short, Env};
-
-    /// Emitted when the circuit breaker is activated (contract frozen).
-    ///
-    /// topics : [Symbol("Frozen")]
-    /// data   : Void
-    pub fn frozen(env: &Env) {
-        env.events().publish((symbol_short!("Frozen"),), ());
-    }
-
-    /// Emitted when the circuit breaker is deactivated (contract unfrozen).
-    ///
-    /// topics : [Symbol("Unfrozen")]
-    /// data   : Void
-    pub fn unfrozen(env: &Env) {
-        env.events().publish((symbol_short!("Unfrozen"),), ());
-    }
+#[contractevent]
+pub struct Unfrozen {
+    #[topic]
+    pub admin: Address,
 }
 
 #[contracterror]
@@ -60,14 +48,20 @@ impl CircuitBreaker {
     pub fn freeze(env: Env, admin: Address) -> Result<(), Error> {
         Self::require_admin(&env, &admin)?;
         env.storage().instance().set(&DataKey::Frozen, &true);
-        events::frozen(&env);
+        Frozen {
+            admin: admin.clone(),
+        }
+        .publish(&env);
         Ok(())
     }
 
     pub fn unfreeze(env: Env, admin: Address) -> Result<(), Error> {
         Self::require_admin(&env, &admin)?;
         env.storage().instance().set(&DataKey::Frozen, &false);
-        events::unfrozen(&env);
+        Unfrozen {
+            admin: admin.clone(),
+        }
+        .publish(&env);
         Ok(())
     }
 

@@ -43,8 +43,13 @@
 
 use soroban_sdk::{
     contract, contractclient, contracterror, contractevent, contractimpl, contracttype, Address,
-    Env, String, Symbol,
+    Env, String, Symbol, Vec,
 };
+
+/// Maximum number of entries `list_entries` will return in a single call.
+/// Bounds the resources consumed by a single invocation regardless of how
+/// large `limit` is requested.
+pub const MAX_PAGE_SIZE: u32 = 100;
 
 // ---------------------------------------------------------------------------
 // Storage types
@@ -106,7 +111,8 @@ pub enum Error {
     NotInitialized = 1,
     AlreadyInitialized = 2,
     NotAuthorized = 3,
-    ContractPaused = 4,
+    /// `limit` passed to `list_entries` exceeds [`MAX_PAGE_SIZE`].
+    PageTooLarge = 4,
 }
 
 // ---------------------------------------------------------------------------
@@ -248,17 +254,40 @@ impl AuditLog {
             .unwrap_or(0u64)
     }
 
-    /// Return the configured admin address, following the same read-back
-    /// pattern as `get_admin` on `allowlist-token`/`denylist-gate` and
-    /// `get_issuer` on `jurisdiction-flag`.
+    /// Return a bounded page of log entries, starting at zero-based index
+    /// `start` and containing at most `limit` entries.
     ///
-    /// Returns `Error::NotInitialized` if `initialize` has not been called
-    /// yet.
-    pub fn get_admin(env: Env) -> Result<Address, Error> {
-        env.storage()
+    /// Stops early (returning fewer than `limit` entries) once `start`
+    /// reaches the current entry count. `limit` must not exceed
+    /// [`MAX_PAGE_SIZE`] — callers that need more entries should page
+    /// through with successive calls.
+    pub fn list_entries(env: Env, start: u64, limit: u32) -> Result<Vec<LogEntry>, Error> {
+        if limit > MAX_PAGE_SIZE {
+            return Err(Error::PageTooLarge);
+        }
+
+        let count: u64 = env
+            .storage()
             .instance()
-            .get(&DataKey::Admin)
-            .ok_or(Error::NotInitialized)
+            .get(&DataKey::EntryCount)
+            .unwrap_or(0u64);
+
+        let mut entries = Vec::new(&env);
+        let mut index = start;
+        let mut collected: u32 = 0;
+        while collected < limit && index < count {
+            if let Some(entry) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, LogEntry>(&DataKey::Entry(index))
+            {
+                entries.push_back(entry);
+            }
+            index += 1;
+            collected += 1;
+        }
+
+        Ok(entries)
     }
 }
 

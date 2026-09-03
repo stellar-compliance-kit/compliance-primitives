@@ -16,6 +16,8 @@
  *   DenyAdd         topics: [Symbol("DenyAdd"), Address]            data: Void
  *   DenyRemove      topics: [Symbol("DenyRemove"), Address]         data: Void
  *   JurisdictionSet topics: [Symbol("JurisdictionSet"), Address]    data: String(code)
+ *   Frozen          topics: [Symbol("Frozen"), Address]             data: Void
+ *   Unfrozen        topics: [Symbol("Unfrozen"), Address]           data: Void
  *
  * For the audit-log contract's ComplianceEvent:
  *
@@ -301,18 +303,6 @@ const KNOWN_EVENTS = new Set([
   "DenyAdd",
   "DenyRemove",
   "JurisdictionSet",
-  // multisig-admin events
-  "SignerAdd",
-  "SignerRm",
-  "ThreshSet",
-  "AuthOk",
-  // compliance-aggregator configuration events
-  "AdminSet",
-  "DenylistGateSet",
-  "JurisdictionFlagSet",
-  // policy-engine evaluation event
-  "PolicyResult",
-  // circuit-breaker state-change events
   "Frozen",
   "Unfrozen",
 ]);

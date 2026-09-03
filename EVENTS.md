@@ -154,6 +154,36 @@ data   : { "code": <String> }
 
 ---
 
+### `circuit-breaker`
+
+#### `Frozen`
+
+Emitted when the admin freezes the circuit breaker.
+
+```
+topics : ["frozen", <admin: Address>]
+data   : {}
+```
+
+| Field | Type | Placement | Description |
+|---|---|---|---|
+| `admin` | `Address` | topic | Admin address that froze the contract |
+
+#### `Unfrozen`
+
+Emitted when the admin unfreezes the circuit breaker.
+
+```
+topics : ["unfrozen", <admin: Address>]
+data   : {}
+```
+
+| Field | Type | Placement | Description |
+|---|---|---|---|
+| `admin` | `Address` | topic | Admin address that unfroze the contract |
+
+---
+
 ## Cross-contract event ordering guarantees
 
 There are none. Each contract emits events only for its own state changes.
