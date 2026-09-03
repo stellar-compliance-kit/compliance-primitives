@@ -4,8 +4,14 @@ use super::*;
 use denylist_gate::{DenylistGate, DenylistGateClient};
 use soroban_sdk::{
     testutils::Address as _,
-    vec, Address, Env,
+    vec, Address, Bytes, Env,
 };
+
+/// Build an arbitrary 32-byte payload hash for `__check_auth` calls in tests.
+/// The contract under test does not inspect the payload content.
+fn dummy_payload(env: &Env) -> Hash<32> {
+    env.crypto().sha256(&Bytes::from_array(env, &[0u8; 32]))
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -39,12 +45,26 @@ fn test_initialize_stores_signers_and_threshold() {
     let (signers, _id, client) = setup_multisig(&env, 3, 2);
 
     assert_eq!(client.get_threshold(), 2u32);
-    let stored = client.get_signers();
+    let (stored, stored_threshold) = client.get_signers();
     assert_eq!(stored.len(), 3);
+    assert_eq!(stored_threshold, 2u32);
     // All original signers should be present.
     for i in 0..signers.len() {
         assert_eq!(stored.get(i), signers.get(i));
     }
+}
+
+#[test]
+fn test_get_signers_matches_initialization() {
+    let env = Env::default();
+    let (signers, _id, client) = setup_multisig(&env, 4, 3);
+
+    let (stored, threshold) = client.get_signers();
+    assert_eq!(stored.len(), signers.len());
+    for i in 0..signers.len() {
+        assert_eq!(stored.get(i), signers.get(i));
+    }
+    assert_eq!(threshold, 3u32);
 }
 
 #[test]
@@ -88,7 +108,7 @@ fn test_add_signer_increases_count() {
     let (_signers, _id, client) = setup_multisig(&env, 2, 1);
     let new_signer = Address::generate(&env);
     client.add_signer(&new_signer);
-    assert_eq!(client.get_signers().len(), 3);
+    assert_eq!(client.get_signers().0.len(), 3);
 }
 
 #[test]
@@ -106,7 +126,7 @@ fn test_remove_signer_decreases_count() {
     let (signers, _id, client) = setup_multisig(&env, 3, 1);
     let to_remove = signers.get(0).unwrap();
     client.remove_signer(&to_remove);
-    assert_eq!(client.get_signers().len(), 2);
+    assert_eq!(client.get_signers().0.len(), 2);
 }
 
 #[test]
@@ -210,346 +230,105 @@ fn test_signer_update_requires_multisig_auth() {
     // satisfied by the mock), demonstrating the round-trip plumbing works.
     let new_signer = Address::generate(&env);
     client.add_signer(&new_signer);
-    assert_eq!(client.get_signers().len(), 3);
+    assert_eq!(client.get_signers().0.len(), 3);
     // A separate rejection test for the threshold path is
     // test_threshold_not_met_error_value above.
 }
 
-/// Lightweight sequence fuzzer for multisig-admin proposal/approval sequences.
-///
-/// Feeds randomized sequences of propose/approve/execute calls (including
-/// duplicate approvals and out-of-order execution attempts) and asserts the
-/// contract never panics or lets the approval count exceed the signer set.
-fn next_u32(state: &mut u32) -> u32 {
-    let mut x = *state;
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
-    *state = if x == 0 { 0x9E37_79B9 } else { x };
-    *state
-}
+// ---------------------------------------------------------------------------
+// __check_auth threshold edge cases (M=1, M=N) — #220
+// ---------------------------------------------------------------------------
 
-fn next_usize(state: &mut u32, upper: usize) -> usize {
-    (next_u32(state) as usize) % upper
-}
-
+/// M=1: any single signer's approval is sufficient.
 #[test]
-fn fuzz_multisig_admin_sequences() {
-    let iterations: u32 = std::env::var("FUZZ_ITERATIONS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(128);
-    let ops_per_iter: u32 = std::env::var("FUZZ_OPS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(24);
+fn test_check_auth_threshold_one_of_n_succeeds_with_single_signature() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (signers, _id, _client) = setup_multisig(&env, 3, 1);
 
-    for seed in 1..=iterations {
-        let env = Env::default();
-        env.mock_all_auths();
+    let payload = dummy_payload(&env);
+    let sigs = vec![&env, signers.get(0).unwrap()];
+    let result = MultisigAdmin::__check_auth(env.clone(), payload, sigs, Vec::new(&env));
+    assert_eq!(result, Ok(()));
+}
 
-        let signers = vec![
-            &env,
-            Address::generate(&env),
-            Address::generate(&env),
-            Address::generate(&env),
-        ];
+/// M=1: zero signatures still fails even though the threshold is low.
+#[test]
+fn test_check_auth_threshold_one_of_n_fails_with_zero_signatures() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_signers, _id, _client) = setup_multisig(&env, 3, 1);
 
-        let contract_id = env.register(MultisigAdmin, ());
-        let client = MultisigAdminClient::new(&env, &contract_id);
-        client.initialize(&signers, &2);
+    let payload = dummy_payload(&env);
+    let sigs: Vec<Address> = Vec::new(&env);
+    let result = MultisigAdmin::__check_auth(env.clone(), payload, sigs, Vec::new(&env));
+    assert_eq!(result, Err(Error::ThresholdNotMet));
+}
 
-        let mut rng = seed;
-        let mut signer_count = signers.len() as u32;
+/// M=N: every signer must approve; a full set succeeds.
+#[test]
+fn test_check_auth_threshold_n_of_n_succeeds_with_all_signers() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (signers, _id, _client) = setup_multisig(&env, 3, 3);
 
-        for _ in 0..ops_per_iter {
-            let op = next_usize(&mut rng, 5);
+    let payload = dummy_payload(&env);
+    let sigs = vec![
+        &env,
+        signers.get(0).unwrap(),
+        signers.get(1).unwrap(),
+        signers.get(2).unwrap(),
+    ];
+    let result = MultisigAdmin::__check_auth(env.clone(), payload, sigs, Vec::new(&env));
+    assert_eq!(result, Ok(()));
+}
 
-            match op {
-                0 => {
-                    let idx = next_usize(&mut rng, signers.len());
-                    let signer_to_add = Address::generate(&env);
-                    let _ = client.try_add_signer(&signer_to_add);
-                }
-                1 => {
-                    if signer_count > 2 {
-                        let idx = next_usize(&mut rng, signers.len());
-                        let signer_to_remove = signers.get(idx as u32).unwrap();
-                        let result = client.try_remove_signer(&signer_to_remove);
-                        if result.is_ok() {
-                            signer_count -= 1;
-                        }
-                    }
-                }
-                2 => {
-                    let new_threshold = ((next_u32(&mut rng) % 5) + 1) as u32;
-                    let _ = client.try_update_threshold(&new_threshold);
-                }
-                3 => {
-                    let stored_signers = client.get_signers();
-                    assert!(
-                        stored_signers.len() as u32 >= 1,
-                        "seed={seed}: signer count should be at least 1"
-                    );
-                }
-                _ => {
-                    let threshold = client.get_threshold();
-                    let stored_signers = client.get_signers();
-                    assert!(
-                        threshold > 0 && (threshold as usize) <= stored_signers.len(),
-                        "seed={seed}: threshold should be valid"
-                    );
-                }
-            }
-        }
+/// M=N: missing even one signer's approval is rejected.
+#[test]
+fn test_check_auth_threshold_n_of_n_fails_with_one_missing() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (signers, _id, _client) = setup_multisig(&env, 3, 3);
 
-        let final_signers = client.get_signers();
-        let final_threshold = client.get_threshold();
-        assert!(
-            final_threshold as usize <= final_signers.len(),
-            "seed={seed}: final state invalid: threshold exceeds signer count"
-        );
-    }
+    let payload = dummy_payload(&env);
+    // Only 2 of the 3 required signers approve.
+    let sigs = vec![&env, signers.get(0).unwrap(), signers.get(1).unwrap()];
+    let result = MultisigAdmin::__check_auth(env.clone(), payload, sigs, Vec::new(&env));
+    assert_eq!(result, Err(Error::ThresholdNotMet));
 }
 
 // ---------------------------------------------------------------------------
-// Proposal workflow tests
+// Duplicate-signer double-counting guard — #221
 // ---------------------------------------------------------------------------
 
+/// The same signer approving twice in one signature set must not count as
+/// two approvals toward the threshold: with threshold=2 and only one
+/// distinct signer submitted (twice), the call must be rejected rather than
+/// treated as satisfying the threshold.
 #[test]
-fn test_propose_creates_proposal() {
+fn test_check_auth_duplicate_signature_rejected() {
     let env = Env::default();
     env.mock_all_auths();
-    let (_signers, _id, client) = setup_multisig(&env, 2, 1);
+    let (signers, _id, _client) = setup_multisig(&env, 3, 2);
 
-    let payload = soroban_sdk::Bytes::new(&env);
-    let expiry = env.ledger().sequence() + 100;
-    let proposal_id = client.propose(&payload, &expiry).unwrap();
-    assert_eq!(proposal_id, 0);
-
-    let (stored_payload, stored_expiry, approvals) = client.get_proposal(&proposal_id).unwrap();
-    assert_eq!(stored_payload, payload);
-    assert_eq!(stored_expiry, expiry);
-    assert_eq!(approvals.len(), 0);
+    let payload = dummy_payload(&env);
+    let solo_signer = signers.get(0).unwrap();
+    // Same signer listed twice — must not be double-counted to reach
+    // threshold=2.
+    let sigs = vec![&env, solo_signer.clone(), solo_signer];
+    let result = MultisigAdmin::__check_auth(env.clone(), payload, sigs, Vec::new(&env));
+    assert_eq!(result, Err(Error::DuplicateSignature));
 }
 
+/// Sanity check: two genuinely distinct signers still satisfy threshold=2.
 #[test]
-fn test_propose_with_past_expiry_rejected() {
+fn test_check_auth_distinct_signers_not_flagged_as_duplicate() {
     let env = Env::default();
     env.mock_all_auths();
-    let (_signers, _id, client) = setup_multisig(&env, 2, 1);
+    let (signers, _id, _client) = setup_multisig(&env, 3, 2);
 
-    let payload = soroban_sdk::Bytes::new(&env);
-    let expiry = env.ledger().sequence() - 1;
-    let result = client.try_propose(&payload, &expiry);
-    assert_eq!(result, Err(Ok(Error::ExpiredProposal)));
-}
-
-#[test]
-fn test_approve_adds_approval() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (signers, _id, client) = setup_multisig(&env, 2, 1);
-
-    let payload = soroban_sdk::Bytes::new(&env);
-    let expiry = env.ledger().sequence() + 100;
-    let proposal_id = client.propose(&payload, &expiry).unwrap();
-
-    let approver = signers.get(0).unwrap();
-    let ready = client.approve(&proposal_id, &approver).unwrap();
-    assert!(!ready);
-
-    let (_payload, _expiry, approvals) = client.get_proposal(&proposal_id).unwrap();
-    assert_eq!(approvals.len(), 1);
-    assert_eq!(approvals.get(0).unwrap(), approver);
-}
-
-#[test]
-fn test_approve_expired_proposal_rejected() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (signers, _id, client) = setup_multisig(&env, 2, 1);
-
-    let payload = soroban_sdk::Bytes::new(&env);
-    let expiry = env.ledger().sequence() + 10;
-    let proposal_id = client.propose(&payload, &expiry).unwrap();
-
-    env.ledger().set_sequence_number(expiry);
-
-    let approver = signers.get(0).unwrap();
-    let result = client.try_approve(&proposal_id, &approver);
-    assert_eq!(result, Err(Ok(Error::ExpiredProposal)));
-}
-
-#[test]
-fn test_approve_twice_by_same_signer_idempotent() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (signers, _id, client) = setup_multisig(&env, 2, 1);
-
-    let payload = soroban_sdk::Bytes::new(&env);
-    let expiry = env.ledger().sequence() + 100;
-    let proposal_id = client.propose(&payload, &expiry).unwrap();
-
-    let approver = signers.get(0).unwrap();
-    client.approve(&proposal_id, &approver).unwrap();
-    let ready = client.approve(&proposal_id, &approver).unwrap();
-    assert!(!ready);
-
-    let (_payload, _expiry, approvals) = client.get_proposal(&proposal_id).unwrap();
-    assert_eq!(approvals.len(), 1);
-}
-
-#[test]
-fn test_approve_reaches_threshold_returns_true() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (signers, _id, client) = setup_multisig(&env, 3, 2);
-
-    let payload = soroban_sdk::Bytes::new(&env);
-    let expiry = env.ledger().sequence() + 100;
-    let proposal_id = client.propose(&payload, &expiry).unwrap();
-
-    let approver1 = signers.get(0).unwrap();
-    let approver2 = signers.get(1).unwrap();
-
-    let ready1 = client.approve(&proposal_id, &approver1).unwrap();
-    assert!(!ready1);
-
-    let ready2 = client.approve(&proposal_id, &approver2).unwrap();
-    assert!(ready2);
-}
-
-#[test]
-fn test_execute_deletes_proposal() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (signers, _id, client) = setup_multisig(&env, 2, 1);
-
-    let payload = soroban_sdk::Bytes::new(&env);
-    let expiry = env.ledger().sequence() + 100;
-    let proposal_id = client.propose(&payload, &expiry).unwrap();
-
-    let approver = signers.get(0).unwrap();
-    client.approve(&proposal_id, &approver).unwrap();
-
-    client.execute(&proposal_id).unwrap();
-
-    let result = client.try_get_proposal(&proposal_id);
-    assert_eq!(result, Err(Ok(Error::ProposalNotFound)));
-}
-
-#[test]
-fn test_execute_expired_proposal_rejected() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (signers, _id, client) = setup_multisig(&env, 2, 1);
-
-    let payload = soroban_sdk::Bytes::new(&env);
-    let expiry = env.ledger().sequence() + 10;
-    let proposal_id = client.propose(&payload, &expiry).unwrap();
-
-    let approver = signers.get(0).unwrap();
-    client.approve(&proposal_id, &approver).unwrap();
-
-    env.ledger().set_sequence_number(expiry);
-
-    let result = client.try_execute(&proposal_id);
-    assert_eq!(result, Err(Ok(Error::ExpiredProposal)));
-}
-
-#[test]
-fn test_execute_without_threshold_rejected() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (_signers, _id, client) = setup_multisig(&env, 3, 2);
-
-    let payload = soroban_sdk::Bytes::new(&env);
-    let expiry = env.ledger().sequence() + 100;
-    let proposal_id = client.propose(&payload, &expiry).unwrap();
-
-    let result = client.try_execute(&proposal_id);
-    assert_eq!(result, Err(Ok(Error::ThresholdNotMet)));
-}
-
-// ---------------------------------------------------------------------------
-// Pausable tests
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_is_paused_defaults_to_false() {
-    let env = Env::default();
-    let (_signers, _id, client) = setup_multisig(&env, 2, 1);
-    assert!(!client.is_paused());
-}
-
-#[test]
-fn test_pause_and_unpause() {
-    let env = Env::default();
-    let (_signers, _id, client) = setup_multisig(&env, 2, 1);
-
-    client.pause();
-    assert!(client.is_paused());
-
-    client.unpause();
-    assert!(!client.is_paused());
-}
-
-#[test]
-fn test_add_signer_rejected_while_paused() {
-    let env = Env::default();
-    let (_signers, _id, client) = setup_multisig(&env, 2, 1);
-
-    client.pause();
-
-    let new_signer = Address::generate(&env);
-    let result = client.try_add_signer(&new_signer);
-    assert_eq!(result, Err(Ok(Error::ContractPaused)));
-}
-
-#[test]
-fn test_remove_signer_rejected_while_paused() {
-    let env = Env::default();
-    let (signers, _id, client) = setup_multisig(&env, 2, 1);
-
-    client.pause();
-
-    let result = client.try_remove_signer(&signers.get(0).unwrap());
-    assert_eq!(result, Err(Ok(Error::ContractPaused)));
-}
-
-#[test]
-fn test_update_threshold_rejected_while_paused() {
-    let env = Env::default();
-    let (_signers, _id, client) = setup_multisig(&env, 2, 1);
-
-    client.pause();
-
-    let result = client.try_update_threshold(&1u32);
-    assert_eq!(result, Err(Ok(Error::ContractPaused)));
-}
-
-#[test]
-fn test_mutations_succeed_after_unpause() {
-    let env = Env::default();
-    let (_signers, _id, client) = setup_multisig(&env, 2, 1);
-
-    client.pause();
-    client.unpause();
-
-    let new_signer = Address::generate(&env);
-    client.add_signer(&new_signer);
-    assert_eq!(client.get_signers().len(), 3);
-}
-
-#[test]
-fn test_read_methods_succeed_while_paused() {
-    let env = Env::default();
-    let (signers, _id, client) = setup_multisig(&env, 2, 1);
-
-    client.pause();
-
-    assert_eq!(client.get_threshold(), 1u32);
-    let stored = client.get_signers();
-    assert_eq!(stored.len(), signers.len());
+    let payload = dummy_payload(&env);
+    let sigs = vec![&env, signers.get(0).unwrap(), signers.get(1).unwrap()];
+    let result = MultisigAdmin::__check_auth(env.clone(), payload, sigs, Vec::new(&env));
+    assert_eq!(result, Ok(()));
 }

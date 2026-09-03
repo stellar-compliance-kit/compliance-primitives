@@ -145,12 +145,9 @@ pub enum Error {
     SignerNotFound = 5,
     /// The address to add is already in the signer set.
     AlreadySigner = 6,
-    /// The proposal has expired and can no longer be approved or executed.
-    ExpiredProposal = 7,
-    /// The proposal with the given ID does not exist.
-    ProposalNotFound = 8,
-    /// Contract is paused.
-    ContractPaused = 9,
+    /// The same signer address appears more than once in the provided
+    /// signature set for a single `__check_auth` call.
+    DuplicateSignature = 7,
 }
 
 // ---------------------------------------------------------------------------
@@ -303,11 +300,22 @@ impl MultisigAdmin {
     // Read-only accessors
     // -----------------------------------------------------------------------
 
-    pub fn get_signers(env: Env) -> Vec<Address> {
-        env.storage()
+    /// Returns the currently configured signer set together with the
+    /// signing threshold, as `(signers, threshold)`. Used by off-chain
+    /// tooling (e.g. the indexer) and by other contracts deciding whether to
+    /// trust this contract as an admin.
+    pub fn get_signers(env: Env) -> (Vec<Address>, u32) {
+        let signers: Vec<Address> = env
+            .storage()
             .instance()
             .get(&DataKey::Signers)
-            .unwrap_or_else(|| Vec::new(&env))
+            .unwrap_or_else(|| Vec::new(&env));
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Threshold)
+            .unwrap_or(0);
+        (signers, threshold)
     }
 
     pub fn get_threshold(env: Env) -> u32 {
@@ -502,6 +510,18 @@ impl CustomAccountInterface for MultisigAdmin {
             .instance()
             .get(&DataKey::Threshold)
             .ok_or(Error::NotInitialized)?;
+
+        // Reject if the same signer address appears more than once in the
+        // provided signature set — otherwise a single signer's approval
+        // could be duplicated to satisfy the threshold on its own.
+        for i in 0..signatures.len() {
+            let addr_i = signatures.get(i).unwrap();
+            for j in (i + 1)..signatures.len() {
+                if signatures.get(j).unwrap() == addr_i {
+                    return Err(Error::DuplicateSignature);
+                }
+            }
+        }
 
         let mut valid_count: u32 = 0;
 
