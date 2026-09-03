@@ -1,3 +1,5 @@
+extern crate std;
+
 use super::*;
 use denylist_gate::{DenylistGate, DenylistGateClient};
 use soroban_sdk::{
