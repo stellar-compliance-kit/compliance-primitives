@@ -195,6 +195,64 @@ impl AllowlistToken {
         Ok(())
     }
 
+    /// Propose a two-step upgrade to `new_wasm` (the replacement contract Wasm).
+    ///
+    /// Admin-only. The upgrade does **not** take effect immediately: it becomes
+    /// committable only once the ledger sequence reaches `activated_at`, which
+    /// `propose_upgrade` sets to `current_ledger + delay_ledgers`. This gives the
+    /// admin, the compliance officer, and any external watchguard a
+    /// `delay_ledgers`-long window to review the proposed Wasm and call
+    /// `cancel_upgrade` before it can be installed — the safe "migration path"
+    /// required by issue #113, in contrast to `jurisdiction-flag::upgrade`, which
+    /// is single-step and issuer-only (see threat model J6).
+    pub fn propose_upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm: soroban_sdk::Bytes,
+        delay_ledgers: u32,
+    ) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        let state = UpgradeState {
+            new_wasm,
+            activated_at: env.ledger().sequence().saturating_add(delay_ledgers as u64),
+        };
+        env.storage().instance().set(&DataKey::PendingUpgrade, &state);
+        env.events().publish((soroban_sdk::symbol_short!("upg_prop"),), (admin, delay_ledgers));
+        Ok(())
+    }
+
+    /// Commit a previously proposed upgrade, installing `new_wasm`.
+    ///
+    /// Admin-only. Errors with `UpgradeNotReady` if no upgrade is pending or if
+    /// the current ledger has not yet reached `activated_at`.
+    pub fn commit_upgrade(env: Env, admin: Address) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        let state: UpgradeState = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgrade)
+            .ok_or(Error::UpgradeNotReady)?;
+        if env.ledger().sequence() < state.activated_at {
+            return Err(Error::UpgradeNotReady);
+        }
+        env.deployer().update_current_contract_wasm(state.new_wasm);
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        env.events().publish((soroban_sdk::symbol_short!("upg_commit"),), (admin,));
+        Ok(())
+    }
+
+    /// Cancel a pending upgrade. Admin-only.
+    pub fn cancel_upgrade(env: Env, admin: Address) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        Ok(())
+    }
+
+    /// Current on-chain schema version (see [`SCHEMA_VERSION`]).
+    pub fn schema_version(env: Env) -> u32 {
+        SCHEMA_VERSION
+    }
+
     /// Returns true if `address` is currently allowlisted.
     ///
     /// Not affected by pause state — reads always succeed.

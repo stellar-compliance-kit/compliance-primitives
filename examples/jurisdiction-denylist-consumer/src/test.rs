@@ -92,3 +92,61 @@ fn test_transfer_blocked_when_jurisdiction_check_fails() {
     assert_eq!(client.balance(&alice), 1_000);
     assert_eq!(client.balance(&bob), 0);
 }
+
+#[test]
+fn test_transfer_rejected_when_only_jurisdiction_check_fails() {
+    let env = Env::default();
+    let (_gate_admin, _gate_id, jurisdiction_issuer, jurisdiction_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+
+    // Alice passes denylist (not on it) but fails jurisdiction (wrong code)
+    let j_client = JurisdictionFlagClient::new(&env, &jurisdiction_id);
+    j_client.set_jurisdiction(&jurisdiction_issuer, &alice, &String::from_str(&env, "GB"));
+
+    client.mint(&alice, &1_000);
+
+    let result = client.try_transfer(&alice, &bob, &400);
+    assert_eq!(result, Err(Ok(Error::DeniedByJurisdiction)));
+    assert_eq!(client.balance(&alice), 1_000);
+    assert_eq!(client.balance(&bob), 0);
+}
+
+#[test]
+fn test_transfer_rejected_when_only_denylist_check_fails() {
+    let env = Env::default();
+    let (gate_admin, gate_id, jurisdiction_issuer, jurisdiction_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+
+    // Alice passes jurisdiction but fails denylist
+    let j_client = JurisdictionFlagClient::new(&env, &jurisdiction_id);
+    j_client.set_jurisdiction(&jurisdiction_issuer, &alice, &String::from_str(&env, "US"));
+
+    DenylistGateClient::new(&env, &gate_id).add_to_denylist(&gate_admin, &alice);
+
+    client.mint(&alice, &1_000);
+
+    let result = client.try_transfer(&alice, &bob, &400);
+    assert_eq!(result, Err(Ok(Error::DeniedByGate)));
+    assert_eq!(client.balance(&alice), 1_000);
+    assert_eq!(client.balance(&bob), 0);
+}
+
+#[test]
+fn test_transfer_succeeds_only_when_both_checks_pass() {
+    let env = Env::default();
+    let (_gate_admin, _gate_id, jurisdiction_issuer, jurisdiction_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+
+    // Alice passes both checks
+    let j_client = JurisdictionFlagClient::new(&env, &jurisdiction_id);
+    j_client.set_jurisdiction(&jurisdiction_issuer, &alice, &String::from_str(&env, "CA"));
+
+    client.mint(&alice, &1_000);
+    client.transfer(&alice, &bob, &400);
+
+    assert_eq!(client.balance(&alice), 600);
+    assert_eq!(client.balance(&bob), 400);
+}

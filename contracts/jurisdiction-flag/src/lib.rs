@@ -200,6 +200,18 @@ impl JurisdictionFlag {
     // Private helpers
     // -----------------------------------------------------------------------
 
+    /// Upgrade the contract WASM. Issuer-only.
+    ///
+    /// Uses Soroban's native `update_current_contract_wasm` host function to
+    /// swap the contract code behind the same contract ID. All existing
+    /// storage (issuer address, jurisdiction flags) is preserved across the
+    /// upgrade. The issuer's auth is verified before the upgrade proceeds.
+    pub fn upgrade(env: Env, issuer: Address, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
+        Self::require_issuer(&env, &issuer)?;
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        Ok(())
+    }
+
     fn require_issuer(env: &Env, issuer: &Address) -> Result<(), Error> {
         issuer.require_auth();
         let stored_issuer: Address = env

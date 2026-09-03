@@ -19,6 +19,7 @@ soroban-sdk = { workspace = true, features = ["testutils"] }
 allowlist-token = { path = "../../contracts/allowlist-token", features = ["testutils"] }
 denylist-gate = { path = "../../contracts/denylist-gate", features = ["testutils"] }
 jurisdiction-flag = { path = "../../contracts/jurisdiction-flag", features = ["testutils"] }
+policy-engine = { path = "../../contracts/policy-engine", features = ["testutils"] }
 
 [features]
 testutils = ["soroban-sdk/testutils"]

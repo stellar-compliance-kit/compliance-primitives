@@ -38,78 +38,70 @@ export interface GetEventsResult {
   latestLedger: number;
 }
 
+export interface SorobanRpcOptions {
+  maxRetries?: number;
+  baseDelayMs?: number;
+  maxDelayMs?: number;
+}
+
 export class SorobanRpc {
   private nextId = 1;
+  private readonly maxRetries: number;
+  private readonly baseDelayMs: number;
+  private readonly maxDelayMs: number;
 
-  constructor(private readonly url: string) {}
+  constructor(private readonly url: string, options: SorobanRpcOptions = {}) {
+    this.maxRetries = options.maxRetries ?? 4;
+    this.baseDelayMs = options.baseDelayMs ?? 250;
+    this.maxDelayMs = options.maxDelayMs ?? 5000;
+  }
+
+  private async request<T>(method: string, params: object): Promise<T> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+      try {
+        const res = await fetch(this.url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: this.nextId++, method, params }) });
+        const text = await res.text();
+        if (!res.ok) {
+          const error = new Error(`RPC HTTP error ${res.status}: ${text}`);
+          if (!this.isTransientStatus(res.status)) throw error;
+          throw error;
+        }
+        const json = JSON.parse(text) as { result?: T; error?: { code: number; message: string } };
+        if (json.error) {
+          const error = new Error(`RPC error ${json.error.code}: ${json.error.message}`);
+          if (!this.isTransientStatus(json.error.code)) throw error;
+          throw error;
+        }
+        if (json.result === undefined) throw new Error(`RPC ${method} returned neither result nor error`);
+        return json.result;
+      } catch (error) {
+        lastError = error;
+        if (attempt === this.maxRetries || !this.isTransientError(error)) throw error;
+        const delay = Math.min(this.maxDelayMs, this.baseDelayMs * 2 ** attempt);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
+
+  private isTransientStatus(statusOrCode: number): boolean {
+    return statusOrCode === 408 || statusOrCode === 425 || statusOrCode === 429 || statusOrCode >= 500 || statusOrCode === -32000 || statusOrCode === -32603;
+  }
+
+  private isTransientError(error: unknown): boolean {
+    if (!(error instanceof Error)) return true;
+    const match = error.message.match(/RPC (?:HTTP error|error) (-?\\d+)/);
+    return match ? this.isTransientStatus(Number(match[1])) : true;
+  }
 
   async getEvents(params: GetEventsParams): Promise<GetEventsResult> {
-    const body = {
-      jsonrpc: "2.0",
-      id: this.nextId++,
-      method: "getEvents",
-      params: {
-        startLedger: params.startLedger,
-        filters: params.filters,
-        pagination: params.pagination ?? { limit: 200 },
-      },
-    };
-
-    const res = await fetch(this.url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-
-    if (!res.ok) {
-      throw new Error(`RPC HTTP error ${res.status}: ${await res.text()}`);
-    }
-
-    const json = (await res.json()) as {
-      result?: { events: RawSorobanEvent[]; latestLedger: number };
-      error?: { code: number; message: string };
-    };
-
-    if (json.error) {
-      throw new Error(
-        `RPC error ${json.error.code}: ${json.error.message}`
-      );
-    }
-
-    if (!json.result) {
-      throw new Error("RPC returned neither result nor error");
-    }
-
-    return json.result;
+    return this.request<GetEventsResult>("getEvents", { startLedger: params.startLedger, filters: params.filters, pagination: params.pagination ?? { limit: 200 } });
   }
 
   /** Fetch the latest known ledger sequence (cheap liveness check). */
   async getLatestLedger(): Promise<number> {
-    const body = {
-      jsonrpc: "2.0",
-      id: this.nextId++,
-      method: "getLatestLedger",
-      params: {},
-    };
-
-    const res = await fetch(this.url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-
-    if (!res.ok) {
-      throw new Error(`RPC HTTP error ${res.status}`);
-    }
-
-    const json = (await res.json()) as {
-      result?: { sequence: number };
-      error?: { code: number; message: string };
-    };
-
-    if (json.error) throw new Error(`RPC error: ${json.error.message}`);
-    if (!json.result) throw new Error("No result from getLatestLedger");
-
-    return json.result.sequence;
+    const result = await this.request<{ sequence: number }>("getLatestLedger", {});
+    return result.sequence;
   }
 }

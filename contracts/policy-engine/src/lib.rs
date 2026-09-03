@@ -140,6 +140,16 @@ enum DataKey {
 // Errors and events
 // ---------------------------------------------------------------------------
 
+/// Maximum number of addresses accepted by `batch_evaluate` in a single call.
+///
+/// Soroban imposes a per-transaction CPU-instruction and memory budget. Each
+/// address in the batch requires one or more cross-contract calls (one per
+/// registered check), so an unbounded list would allow a caller to exhaust
+/// the budget and brick the transaction. 20 was chosen to mirror the limit
+/// used in the `compliance-aggregator` batch family and to keep the worst-case
+/// instruction cost within the conservative end of the Soroban default budget.
+pub const MAX_BATCH_SIZE: u32 = 20;
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -148,7 +158,17 @@ pub enum Error {
     AlreadyInitialized = 2,
     NotAuthorized = 3,
     PolicyViolation = 4,
+    /// Returned by `add_check` when the number of registered checks would
+    /// exceed `MAX_CHECKS`. Keeps per-evaluation resource cost bounded and
+    /// prevents unbounded storage growth.
+    MaxDepthExceeded = 5,
 }
+
+/// Maximum number of checks that can be registered in a single policy
+/// engine instance.  Chosen to keep per-`evaluate` cross-contract call
+/// overhead well within Soroban's instruction limits while still supporting
+/// all realistic compliance stack sizes.
+pub const MAX_CHECKS: u32 = 16;
 
 /// Emitted by `evaluate` regardless of the pass/fail outcome so that
 /// off-chain compliance tooling can build a full audit trail even when the
@@ -200,18 +220,47 @@ impl PolicyEngine {
         Ok(())
     }
 
+    /// Pause policy mutations (`add_check` / `remove_check`). Admin-only.
+    pub fn pause(env: Env, admin: Address) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        compliance_pausable::pause(&env);
+        env.events().publish((), soroban_sdk::symbol_short!("Paused"));
+        Ok(())
+    }
+
+    /// Resume policy mutations after a pause. Admin-only.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        compliance_pausable::unpause(&env);
+        env.events().publish((), soroban_sdk::symbol_short!("Unpaused"));
+        Ok(())
+    }
+
+    /// Check if the contract is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        compliance_pausable::is_paused(&env)
+    }
+
     // -----------------------------------------------------------------------
     // Admin mutations
     // -----------------------------------------------------------------------
 
     /// Append a new `check` to the end of the policy list. Admin-only.
+    ///
+    /// Returns `Err(Error::MaxDepthExceeded)` if the list already contains
+    /// `MAX_CHECKS` entries. This keeps the number of cross-contract calls
+    /// issued by `evaluate` bounded and prevents storage bloat.
     pub fn add_check(env: Env, admin: Address, check: CheckKind) -> Result<(), Error> {
+        compliance_pausable::require_not_paused_or(&env, Error::ContractPaused)?;
         Self::require_admin(&env, &admin)?;
         let mut checks: Vec<CheckKind> = env
             .storage()
             .instance()
             .get(&DataKey::Checks)
             .ok_or(Error::NotInitialized)?;
+        if checks.len() >= MAX_CHECKS {
+            return Err(Error::MaxDepthExceeded);
+        }
         checks.push_back(check);
         env.storage().instance().set(&DataKey::Checks, &checks);
         Ok(())
@@ -220,6 +269,7 @@ impl PolicyEngine {
     /// Remove the check at position `index` from the policy list.
     /// Admin-only. Indices shift down after removal (Vec::remove semantics).
     pub fn remove_check(env: Env, admin: Address, index: u32) -> Result<(), Error> {
+        compliance_pausable::require_not_paused_or(&env, Error::ContractPaused)?;
         Self::require_admin(&env, &admin)?;
         let mut checks: Vec<CheckKind> = env
             .storage()
@@ -300,6 +350,75 @@ impl PolicyEngine {
         Ok(passed)
     }
 
+    /// Evaluate the configured policy for each address in `addresses`
+    /// individually and return a `Vec<bool>` of results in the same order.
+    ///
+    /// Each address is run through every registered check on its own — this
+    /// is a per-address (not per-transfer) evaluation. Use `evaluate` when
+    /// you need to gate a specific `from → to` transfer; use `batch_evaluate`
+    /// when you want to screen a list of addresses in a single call (e.g.
+    /// pre-screening a participant registry).
+    ///
+    /// Returns `Err(Error::BatchTooLarge)` if `addresses.len() >
+    /// MAX_BATCH_SIZE` to prevent budget exhaustion. Returns
+    /// `Err(Error::NotInitialized)` if the contract has not been set up yet.
+    ///
+    /// No `PolicyResult` event is emitted per-address to keep the batch
+    /// cost predictable; callers that need an audit trail should call
+    /// `evaluate` individually for the addresses they intend to act on.
+    pub fn batch_evaluate(env: Env, addresses: Vec<Address>) -> Result<Vec<bool>, Error> {
+        if addresses.len() > MAX_BATCH_SIZE {
+            return Err(Error::BatchTooLarge);
+        }
+
+        let checks: Vec<CheckKind> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Checks)
+            .ok_or(Error::NotInitialized)?;
+        let op: CombineOp = env
+            .storage()
+            .instance()
+            .get(&DataKey::CombineOp)
+            .ok_or(Error::NotInitialized)?;
+
+        let mut results: Vec<bool> = Vec::new(&env);
+
+        for address in addresses.iter() {
+            let passed = match op {
+                CombineOp::All => {
+                    let mut all_pass = true;
+                    for i in 0..checks.len() {
+                        let check = checks.get(i).unwrap();
+                        if !Self::run_check(&env, &check, &address) {
+                            all_pass = false;
+                            break;
+                        }
+                    }
+                    all_pass
+                }
+                CombineOp::Any => {
+                    if checks.is_empty() {
+                        false
+                    } else {
+                        let mut any_pass = false;
+                        for i in 0..checks.len() {
+                            let check = checks.get(i).unwrap();
+                            if Self::run_check(&env, &check, &address) {
+                                any_pass = true;
+                                break;
+                            }
+                        }
+                        any_pass
+                    }
+                }
+            };
+            results.push_back(passed);
+        }
+
+        Ok(results)
+    }
+
     // -----------------------------------------------------------------------
     // Read-only accessors
     // -----------------------------------------------------------------------
@@ -354,6 +473,9 @@ impl PolicyEngine {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod test_utils;
 
 #[cfg(test)]
 mod test;
