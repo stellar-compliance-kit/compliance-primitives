@@ -67,12 +67,11 @@ pub trait JurisdictionCheckInterface {
     fn is_permitted_jurisdiction(env: Env, address: Address, allowed_codes: Vec<String>) -> bool;
 }
 
-/// Describes the `allowlist-token` contract interface used for cross-contract
-/// calls. The generated `AllowlistCheckClient` is used in `evaluate` to call
-/// `is_allowed()` on a deployed allowlist-token instance.
-#[contractclient(name = "AllowlistCheckClient")]
-pub trait AllowlistCheckInterface {
-    fn is_allowed(env: Env, address: Address) -> bool;
+/// Describes the `circuit-breaker` contract interface used for cross-contract
+/// calls. Same reason as above for avoiding a direct crate dep.
+#[contractclient(name = "CircuitBreakerClient")]
+pub trait CircuitBreakerInterface {
+    fn is_frozen(env: Env) -> bool;
 }
 
 // ---------------------------------------------------------------------------
@@ -145,6 +144,9 @@ enum DataKey {
     Admin,
     Checks,
     CombineOp,
+    /// Address of the `circuit-breaker` contract to consult, if any. When
+    /// set and frozen, `evaluate` short-circuits to deny.
+    CircuitBreaker,
 }
 
 // ---------------------------------------------------------------------------
@@ -227,7 +229,12 @@ impl PolicyEngine {
     /// One-time initializer. Sets `admin` as the authorized manager and
     /// `op` as the combination operator for all future evaluations.
     /// Initializes the check list to empty.
-    pub fn initialize(env: Env, admin: Address, op: CombineOp) -> Result<(), Error> {
+    pub fn initialize(
+        env: Env,
+        admin: Address,
+        op: CombineOp,
+        circuit_breaker: Option<Address>,
+    ) -> Result<(), Error> {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::AlreadyInitialized);
         }
@@ -236,28 +243,27 @@ impl PolicyEngine {
         env.storage().instance().set(&DataKey::CombineOp, &op);
         let empty: Vec<CheckKind> = Vec::new(&env);
         env.storage().instance().set(&DataKey::Checks, &empty);
+        if let Some(breaker) = circuit_breaker {
+            env.storage()
+                .instance()
+                .set(&DataKey::CircuitBreaker, &breaker);
+        }
         Ok(())
     }
 
-    /// Pause policy mutations (`add_check` / `remove_check`). Admin-only.
-    pub fn pause(env: Env, admin: Address) -> Result<(), Error> {
+    /// Register or replace the `circuit-breaker` contract address.
+    /// Admin-only. Pass this to enable emergency-freeze short-circuiting.
+    pub fn set_circuit_breaker(env: Env, admin: Address, breaker: Address) -> Result<(), Error> {
         Self::require_admin(&env, &admin)?;
-        compliance_pausable::pause(&env);
-        env.events().publish((), soroban_sdk::symbol_short!("Paused"));
+        env.storage()
+            .instance()
+            .set(&DataKey::CircuitBreaker, &breaker);
         Ok(())
     }
 
-    /// Resume policy mutations after a pause. Admin-only.
-    pub fn unpause(env: Env, admin: Address) -> Result<(), Error> {
-        Self::require_admin(&env, &admin)?;
-        compliance_pausable::unpause(&env);
-        env.events().publish((), soroban_sdk::symbol_short!("Unpaused"));
-        Ok(())
-    }
-
-    /// Check if the contract is currently paused.
-    pub fn is_paused(env: Env) -> bool {
-        compliance_pausable::is_paused(&env)
+    /// Returns the currently registered `circuit-breaker` address, if any.
+    pub fn circuit_breaker(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::CircuitBreaker)
     }
 
     // -----------------------------------------------------------------------
@@ -313,6 +319,24 @@ impl PolicyEngine {
     /// on-chain regardless of the result. `Err` is returned only for
     /// configuration failures (e.g. the contract was never initialized).
     pub fn evaluate(env: Env, from: Address, to: Address) -> Result<bool, Error> {
+        // Emergency freeze short-circuit: if a configured circuit-breaker is
+        // frozen, deny outright without evaluating any registered checks.
+        let breaker_addr: Option<Address> = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::CircuitBreaker);
+        if let Some(addr) = breaker_addr {
+            if CircuitBreakerClient::new(&env, &addr).is_frozen() {
+                PolicyResult {
+                    passed: false,
+                    from: from.clone(),
+                    to: to.clone(),
+                }
+                .publish(&env);
+                return Ok(false);
+            }
+        }
+
         let checks: Vec<CheckKind> = env
             .storage()
             .instance()

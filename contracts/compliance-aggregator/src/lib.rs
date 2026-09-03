@@ -74,6 +74,13 @@ pub trait JurisdictionFlagInterface {
     fn is_permitted_jurisdiction(env: Env, address: Address, allowed_codes: Vec<String>) -> bool;
 }
 
+/// Subset of the `circuit-breaker` interface that this aggregator uses.
+/// Must match the actual contract's exported function signature exactly.
+#[soroban_sdk::contractclient(name = "CircuitBreakerClient")]
+pub trait CircuitBreakerInterface {
+    fn is_frozen(env: Env) -> bool;
+}
+
 // ---------------------------------------------------------------------------
 // Storage keys
 // ---------------------------------------------------------------------------
@@ -87,6 +94,9 @@ enum DataKey {
     DenylistGate,
     /// Address of the `jurisdiction-flag` contract to call, if any.
     JurisdictionFlag,
+    /// Address of the `circuit-breaker` contract to consult, if any. When
+    /// set and frozen, all checks short-circuit to deny.
+    CircuitBreaker,
 }
 
 // ---------------------------------------------------------------------------
@@ -144,6 +154,12 @@ pub struct JurisdictionFlagSet {
     pub flag: Address,
 }
 
+#[contractevent]
+pub struct CircuitBreakerSet {
+    #[topic]
+    pub breaker: Address,
+}
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -183,6 +199,7 @@ impl ComplianceAggregator {
         admin: Address,
         denylist_gate: Option<Address>,
         jurisdiction_flag: Option<Address>,
+        circuit_breaker: Option<Address>,
     ) -> Result<(), Error> {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::AlreadyInitialized);
@@ -203,6 +220,12 @@ impl ComplianceAggregator {
                 .instance()
                 .set(&DataKey::JurisdictionFlag, &flag);
             JurisdictionFlagSet { flag }.publish(&env);
+        }
+        if let Some(breaker) = circuit_breaker {
+            env.storage()
+                .instance()
+                .set(&DataKey::CircuitBreaker, &breaker);
+            CircuitBreakerSet { breaker }.publish(&env);
         }
         Ok(())
     }
@@ -261,6 +284,17 @@ impl ComplianceAggregator {
         Ok(())
     }
 
+    /// Register or replace the `circuit-breaker` contract address. Admin-only.
+    /// Pass this to enable emergency-freeze short-circuiting of all checks.
+    pub fn set_circuit_breaker(env: Env, admin: Address, breaker: Address) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::CircuitBreaker, &breaker);
+        CircuitBreakerSet { breaker }.publish(&env);
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Read helpers
     // -----------------------------------------------------------------------
@@ -273,6 +307,24 @@ impl ComplianceAggregator {
     /// Returns the currently registered `jurisdiction-flag` address, if any.
     pub fn jurisdiction_flag(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::JurisdictionFlag)
+    }
+
+    /// Returns the currently registered `circuit-breaker` address, if any.
+    pub fn circuit_breaker(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::CircuitBreaker)
+    }
+
+    /// Returns `true` if a circuit-breaker is configured and it is
+    /// currently frozen.
+    fn is_frozen(env: &Env) -> bool {
+        let breaker_addr: Option<Address> = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::CircuitBreaker);
+        match breaker_addr {
+            Some(addr) => CircuitBreakerClient::new(env, &addr).is_frozen(),
+            None => false,
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -300,6 +352,12 @@ impl ComplianceAggregator {
         address: Address,
         allowed_jurisdictions: Vec<String>,
     ) -> Result<(bool, Vec<CheckResult>), Error> {
+        // Emergency freeze short-circuit: if a configured circuit-breaker is
+        // frozen, deny outright without evaluating the underlying checks.
+        if Self::is_frozen(&env) {
+            return Ok((false, Vec::new(&env)));
+        }
+
         let mut results: Vec<CheckResult> = Vec::new(&env);
         let mut all_passed = true;
 
@@ -360,6 +418,21 @@ impl ComplianceAggregator {
     ) -> Result<Vec<AddressCheckResult>, Error> {
         if addresses.is_empty() {
             return Err(Error::EmptyAddressList);
+        }
+
+        // Emergency freeze short-circuit: if a configured circuit-breaker is
+        // frozen, deny every address outright without evaluating the
+        // underlying checks.
+        if Self::is_frozen(&env) {
+            let mut batch: Vec<AddressCheckResult> = Vec::new(&env);
+            for address in addresses.iter() {
+                batch.push_back(AddressCheckResult {
+                    address,
+                    all_passed: false,
+                    checks: Vec::new(&env),
+                });
+            }
+            return Ok(batch);
         }
 
         // Resolve contract addresses once, outside the per-address loop, to

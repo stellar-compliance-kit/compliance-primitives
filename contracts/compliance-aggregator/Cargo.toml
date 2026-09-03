@@ -19,6 +19,7 @@ compliance-pausable = { workspace = true }
 soroban-sdk = { workspace = true, features = ["testutils"] }
 denylist-gate = { path = "../denylist-gate", features = ["testutils"] }
 jurisdiction-flag = { path = "../jurisdiction-flag", features = ["testutils"] }
+circuit-breaker = { path = "../circuit-breaker", features = ["testutils"] }
 
 [features]
 testutils = ["soroban-sdk/testutils"]

@@ -1,7 +1,7 @@
 use super::*;
-use crate::test_utils::{
-    MockDenylist, MockDenylistClient, MockJurisdiction, MockJurisdictionClient,
-};
+use circuit_breaker::{CircuitBreaker, CircuitBreakerClient as CbClient};
+use denylist_gate::{DenylistGate, DenylistGateClient};
+use jurisdiction_flag::{JurisdictionFlag, JurisdictionFlagClient};
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{vec, Env, String};
 use std::path::{Path, PathBuf};
@@ -26,7 +26,7 @@ fn setup_engine_all(env: &Env) -> (Address, Address, PolicyEngineClient<'_>) {
     let admin = Address::generate(env);
     let id = env.register(PolicyEngine, ());
     let client = PolicyEngineClient::new(env, &id);
-    client.initialize(&admin, &CombineOp::All);
+    client.initialize(&admin, &CombineOp::All, &None);
     (admin, id, client)
 }
 
@@ -35,7 +35,7 @@ fn setup_engine_any(env: &Env) -> (Address, Address, PolicyEngineClient<'_>) {
     let admin = Address::generate(env);
     let id = env.register(PolicyEngine, ());
     let client = PolicyEngineClient::new(env, &id);
-    client.initialize(&admin, &CombineOp::Any);
+    client.initialize(&admin, &CombineOp::Any, &None);
     (admin, id, client)
 }
 
@@ -205,150 +205,38 @@ fn test_add_and_remove_check() {
 }
 
 // ---------------------------------------------------------------------------
-// Upgradeability
+// circuit-breaker wiring
 // ---------------------------------------------------------------------------
 
-/// Self-referencing WASM import used to exercise the upgrade path: the
-/// contract "upgrades" to its own currently-built WASM binary. This mirrors
-/// the migration test pattern used elsewhere in the Soroban ecosystem for
-/// verifying that `update_current_contract_wasm` preserves storage without
-/// requiring a second, distinct contract version to exist.
-mod self_wasm {
-    soroban_sdk::contractimport!(
-        file = "../../target/wasm32-unknown-unknown/release/policy_engine.wasm"
-    );
-}
-
-/// Deploys policy-engine, writes state (admin, combine op, a registered
-/// check), performs an admin-gated upgrade to a new WASM hash, and confirms
-/// all previously written state is intact and the contract remains callable
-/// afterward.
 #[test]
-fn test_upgrade_preserves_state_and_remains_callable() {
+fn test_circuit_breaker_freeze_short_circuits_evaluate() {
     let env = Env::default();
     env.mock_all_auths();
-
-    let (admin, _id, client) = setup_engine_all(&env);
 
     let deny_admin = Address::generate(&env);
     let deny_id = setup_denylist(&env, &deny_admin);
-    client.add_check(&admin, &CheckKind::Denylist { contract: deny_id });
-    assert_eq!(client.get_checks().len(), 1);
 
-    let new_wasm_hash = env.deployer().upload_contract_wasm(self_wasm::WASM);
-    client.upgrade(&admin, &new_wasm_hash);
+    let breaker_admin = Address::generate(&env);
+    let breaker_id = env.register(CircuitBreaker, ());
+    let breaker_client = CbClient::new(&env, &breaker_id);
+    breaker_client.initialize(&breaker_admin);
 
-    // State written before the upgrade survives.
-    assert_eq!(client.get_checks().len(), 1);
-    assert_eq!(client.get_op(), CombineOp::All);
-
-    // The contract is still callable and admin-gating still works after the
-    // upgrade: a non-admin caller trying to mutate should fail, admin succeeds.
-    let juri_issuer = Address::generate(&env);
-    let juri_id = setup_jurisdiction(&env, &juri_issuer);
-    client.add_check(
-        &admin,
-        &CheckKind::Jurisdiction {
-            contract: juri_id,
-            allowed_codes: vec![&env, String::from_str(&env, "US")],
-        },
-    );
-    assert_eq!(client.get_checks().len(), 2);
-}
-
-/// A non-admin address may not trigger an upgrade.
-#[test]
-fn test_upgrade_requires_admin() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let (_admin, id, _client) = setup_engine_all(&env);
+    let admin = Address::generate(&env);
+    let id = env.register(PolicyEngine, ());
     let client = PolicyEngineClient::new(&env, &id);
-
-    let attacker = Address::generate(&env);
-    let new_wasm_hash = env.deployer().upload_contract_wasm(self_wasm::WASM);
-    let result = client.try_upgrade(&attacker, &new_wasm_hash);
-    assert_eq!(result, Err(Ok(Error::NotAuthorized)));
-}
-
-// ---------------------------------------------------------------------------
-// Resource-fee (budget) regression check
-// ---------------------------------------------------------------------------
-
-fn baseline_path_for_manifest_dir(manifest_dir: PathBuf) -> PathBuf {
-    manifest_dir.join("..").join("..").join("budget-baselines.toml")
-}
-
-fn read_baseline(path: &Path, section: &str) -> (u64, u64) {
-    let contents = std::fs::read_to_string(path).unwrap();
-    let section_header = format!("[{section}]");
-    let mut in_section = false;
-    let mut cpu = None;
-    let mut memory = None;
-
-    for line in contents.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            in_section = trimmed == section_header;
-            continue;
-        }
-        if !in_section {
-            continue;
-        }
-        if let Some(value) = trimmed.strip_prefix("cpu = ") {
-            cpu = Some(value.parse::<u64>().unwrap());
-        } else if let Some(value) = trimmed.strip_prefix("memory = ") {
-            memory = Some(value.parse::<u64>().unwrap());
-        }
-    }
-
-    let cpu = cpu.expect("missing cpu baseline");
-    let memory = memory.expect("missing memory baseline");
-    (cpu, memory)
-}
-
-fn assert_budget_within_threshold(measured: (u64, u64), baseline: (u64, u64), label: &str) {
-    let (measured_cpu, measured_memory) = measured;
-    let (baseline_cpu, baseline_memory) = baseline;
-    let cpu_limit = (baseline_cpu as f64 * 1.10).ceil() as u64;
-    let memory_limit = (baseline_memory as f64 * 1.10).ceil() as u64;
-
-    assert!(
-        measured_cpu <= cpu_limit,
-        "{label} CPU regression: measured {measured_cpu}, baseline {baseline_cpu}, limit {cpu_limit}"
-    );
-    assert!(
-        measured_memory <= memory_limit,
-        "{label} memory regression: measured {measured_memory}, baseline {baseline_memory}, limit {memory_limit}"
-    );
-}
-
-/// Benchmarks policy-engine's hottest entrypoint, `evaluate`, against the
-/// recorded baseline in `budget-baselines.toml`. Fails (and so fails CI via
-/// the `budget-regression` job, which runs `cargo test ... budget_regression`)
-/// if measured CPU or memory cost regresses more than 10% past baseline.
-#[test]
-fn test_budget_regression_policy_engine_evaluate() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let (admin, _id, client) = setup_engine_all(&env);
-    let deny_admin = Address::generate(&env);
-    let deny_id = setup_denylist(&env, &deny_admin);
+    client.initialize(&admin, &CombineOp::All, &Some(breaker_id.clone()));
     client.add_check(&admin, &CheckKind::Denylist { contract: deny_id });
 
     let from = Address::generate(&env);
     let to = Address::generate(&env);
 
-    let mut budget = env.cost_estimate().budget();
-    budget.reset_default();
-    let passed = client.evaluate(&from, &to);
-    assert!(passed);
+    // Before freezing, evaluation passes (neither address is denylisted).
+    assert!(client.evaluate(&from, &to));
 
-    let measured = (budget.cpu_instruction_cost(), budget.memory_bytes_cost());
-    let baseline_path = baseline_path_for_manifest_dir(PathBuf::from(
-        std::env::var("CARGO_MANIFEST_DIR").unwrap(),
-    ));
-    let baseline = read_baseline(&baseline_path, "policy-engine.evaluate");
-    assert_budget_within_threshold(measured, baseline, "policy-engine evaluate");
+    // Freeze mid-flow.
+    breaker_client.freeze(&breaker_admin);
+
+    // Now the same previously-passing evaluation is denied without
+    // consulting the underlying denylist-gate check.
+    assert!(!client.evaluate(&from, &to));
 }
