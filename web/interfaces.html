@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Interfaces — compliance-primitives</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <nav><div class="wrap"><a class="brand" href="index.html">compliance-primitives</a><a href="index.html">Back to overview</a></div></nav>
+  <main class="wrap interface-docs">
+    <p class="badge">Generated from docs/interfaces</p>
+    <h1>Contract interfaces</h1><p>This page lists the public interfaces exposed by the compliance primitives. The site version is generated from the Markdown files in this directory.</p><section class="interface-section"><h2>allowlist-token</h2><p>The wrapper forwards a transfer only when both participants are on the allowlist.</p><pre class="code"><code>add_to_allowlist(admin, address)
+is_allowed(address) -&gt; bool
+transfer(from, to, amount) -&gt; bool</code></pre></section><section class="interface-section"><h2>denylist-gate</h2><p>A composable gate that other contracts call before moving funds.</p><pre class="code"><code>add_to_denylist(admin, address)
+check(address) -&gt; bool</code></pre></section><section class="interface-section"><h2>jurisdiction-flag</h2><p>Stores issuer-controlled jurisdiction codes and checks permitted code lists.</p><pre class="code"><code>set_jurisdiction(issuer, address, code)
+is_permitted_jurisdiction(address, allowed_codes) -&gt; bool</code></pre></section>
+  </main>
+  <footer><div class="wrap">MIT License · part of the Drips Wave Stellar Program</div></footer>
+</body>
+</html>

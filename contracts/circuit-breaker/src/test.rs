@@ -1,6 +1,8 @@
+extern crate std;
+
 use super::*;
 use soroban_sdk::testutils::Address as _;
-use soroban_sdk::Env;
+use soroban_sdk::{Env, IntoVal};
 
 fn setup(env: &Env) -> (Address, CircuitBreakerClient<'_>) {
     env.mock_all_auths();
@@ -28,6 +30,30 @@ fn test_admin_can_freeze_and_unfreeze() {
 
     client.unfreeze(&admin);
     assert!(!client.is_frozen());
+}
+
+#[test]
+fn test_freeze_and_unfreeze_emit_events_with_admin() {
+    let env = Env::default();
+    let (admin, client) = setup(&env);
+
+    client.freeze(&admin);
+    let freeze_events = env.events().all();
+    let (_contract_id, topics, _data) = freeze_events.last().unwrap();
+    assert_eq!(
+        topics.get_unchecked(0),
+        soroban_sdk::Symbol::new(&env, "frozen").into_val(&env)
+    );
+    assert_eq!(topics.get_unchecked(1), admin.clone().into_val(&env));
+
+    client.unfreeze(&admin);
+    let unfreeze_events = env.events().all();
+    let (_contract_id, topics, _data) = unfreeze_events.last().unwrap();
+    assert_eq!(
+        topics.get_unchecked(0),
+        soroban_sdk::Symbol::new(&env, "unfrozen").into_val(&env)
+    );
+    assert_eq!(topics.get_unchecked(1), admin.clone().into_val(&env));
 }
 
 #[test]

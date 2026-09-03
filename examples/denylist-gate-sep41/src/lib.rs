@@ -1,46 +1,62 @@
-//! `denylist-gate-sep41` — a SEP-41-conformant token contract that gates every
-//! `transfer` call through a deployed `denylist-gate` instance.
+//! # SEP-41 Token Gated by Denylist
 //!
-//! # Why this example exists
+//! A SEP-41-conformant token contract that gates every `transfer` call through
+//! a deployed `denylist-gate` instance.
 //!
-//! [`examples/denylist-gate-consumer`] shows the cross-contract calling pattern
-//! using a minimal from-scratch token that does not implement the full SEP-41
-//! interface.  That is enough to understand the composition mechanic, but a real
-//! issuer needs to see the pattern applied to a token that actually satisfies
-//! the SEP-41 interface — so this crate fills that gap.
+//! ## Purpose and Scope
 //!
-//! ## SEP-41 interface
+//! This example bridges two concerns:
+//! - **SEP-41 Compliance**: Wallets, DEXes, and ecosystem tooling expect tokens
+//!   to implement a standard interface. This contract provides that interface.
+//! - **Compliance Composition**: Tokens often need to gate transfers through
+//!   compliance checks. This contract integrates a single `denylist-gate` check
+//!   into a SEP-41 token.
 //!
-//! SEP-41 specifies these entry points (see
+//! By showing the pattern applied to a real SEP-41 interface, issuers can see
+//! how their token contract (which end-users and wallets interact with) can
+//! transparently invoke compliance primitives without changing the user-facing API.
+//!
+//! ## SEP-41 Entry Points
+//!
+//! This contract implements all entry points required by SEP-41 (see
 //! <https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0041.md>):
+//! - `initialize(admin, decimal, name, symbol)` — one-time setup
+//! - `allowance(from, spender) -> i128` — read allowance
+//! - `approve(from, spender, amount, expiration_ledger)` — grant approval
+//! - `balance(id) -> i128` — read balance
+//! - `transfer(from, to, amount)` — transfer with denylist gate
+//! - `transfer_from(spender, from, to, amount)` — transfer with allowance and gate
+//! - `burn(from, amount)` — burn tokens
+//! - `burn_from(spender, from, amount)` — burn with allowance
+//! - `decimals() -> u32` — token decimals
+//! - `name() -> String` — token name
+//! - `symbol() -> String` — token symbol
 //!
-//! - `initialize(admin, decimal, name, symbol)`
-//! - `allowance(from, spender) -> i128`
-//! - `approve(from, spender, amount, expiration_ledger)`
-//! - `balance(id) -> i128`
-//! - `transfer(from, to, amount)`
-//! - `transfer_from(spender, from, to, amount)`
-//! - `burn(from, amount)`
-//! - `burn_from(spender, from, amount)`
-//! - `decimals() -> u32`
-//! - `name() -> String`
-//! - `symbol() -> String`
+//! In addition, an admin-only `mint` function is provided for testing and
+//! demonstration (not part of the SEP-41 spec).
 //!
-//! This implementation provides all required entry points and gates `transfer`
-//! (and `transfer_from`) through `denylist-gate`.  Admin-only `mint` is added
-//! as a convenience for tests.
+//! ## Composition Pattern
 //!
-//! ## Composition pattern — same as `denylist-gate-consumer`
+//! The denylist gate is wired as a **cross-contract client** using the
+//! `#[contractclient]` trait pattern, avoiding linker symbol collisions:
 //!
-//! The key difference from that example is that here the token's outer API is
-//! fully SEP-41 shaped, so wallets and DEXes see a standard token.  The gate
-//! check is invisible to callers — they just call `transfer` as normal, and
-//! receive a `DeniedByGate` error if either party is on the denylist.
+//! 1. No direct dependency on `denylist-gate` crate in `[dependencies]`
+//! 2. A `#[contractclient]` trait describes only the call shape
+//! 3. `gate_check()` helper verifies both `from` and `to` parties against the gate
+//! 4. If either party is denied, `transfer` or `transfer_from` returns `DeniedByGate`
 //!
-//! The `#[contractclient]` trait trick is identical: we do **not** add
-//! `denylist-gate` as a `[dependencies]` entry (only as `[dev-dependencies]`
-//! for tests), so the gate's `#[contractimpl]` exports don't collide with this
-//! contract's exports at link time.
+//! The gate check is invisible to API consumers — they call standard `transfer`
+//! as normal and receive a standard error if denied. Wallets can treat this as
+//! a regular SEP-41 token.
+//!
+//! ## Differences from other examples
+//!
+//! - **vs. `/examples/denylist-gate-consumer`**: That is a minimal token showing
+//!   the gate-check pattern. This crate shows the pattern applied to the full
+//!   SEP-41 interface so issuers can copy the pattern into production.
+//! - **vs. `/examples/rwa-token` and `/examples/rwa-compliance-flow`**: Those compose
+//!   all three primitives (allowlist, denylist, jurisdiction). This composes
+//!   denylist only, keeping the example focused on a single gate.
 #![no_std]
 
 use soroban_sdk::{

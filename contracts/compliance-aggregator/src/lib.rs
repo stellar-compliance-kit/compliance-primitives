@@ -173,6 +173,7 @@ pub enum Error {
     NotAuthorized = 3,
     NoChecksRegistered = 4,
     EmptyAddressList = 5,
+    ContractPaused = 6,
 }
 
 // ---------------------------------------------------------------------------
@@ -229,12 +230,34 @@ impl ComplianceAggregator {
         Ok(())
     }
 
+    /// Pause configuration mutations. Admin-only.
+    pub fn pause(env: Env, admin: Address) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        compliance_pausable::pause(&env);
+        env.events().publish((), soroban_sdk::symbol_short!("Paused"));
+        Ok(())
+    }
+
+    /// Resume configuration mutations after a pause. Admin-only.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        compliance_pausable::unpause(&env);
+        env.events().publish((), soroban_sdk::symbol_short!("Unpaused"));
+        Ok(())
+    }
+
+    /// Check if the contract is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        compliance_pausable::is_paused(&env)
+    }
+
     // -----------------------------------------------------------------------
     // Admin management
     // -----------------------------------------------------------------------
 
     /// Replace the admin. Old admin must authorize.
     pub fn set_admin(env: Env, admin: Address, new_admin: Address) -> Result<(), Error> {
+        compliance_pausable::require_not_paused_or(&env, Error::ContractPaused)?;
         Self::require_admin(&env, &admin)?;
         env.storage().instance().set(&DataKey::Admin, &new_admin);
         AdminSet { admin: new_admin }.publish(&env);
@@ -243,6 +266,7 @@ impl ComplianceAggregator {
 
     /// Register or replace the `denylist-gate` contract address. Admin-only.
     pub fn set_denylist_gate(env: Env, admin: Address, gate: Address) -> Result<(), Error> {
+        compliance_pausable::require_not_paused_or(&env, Error::ContractPaused)?;
         Self::require_admin(&env, &admin)?;
         env.storage().instance().set(&DataKey::DenylistGate, &gate);
         DenylistGateSet { gate }.publish(&env);
@@ -251,6 +275,7 @@ impl ComplianceAggregator {
 
     /// Register or replace the `jurisdiction-flag` contract address. Admin-only.
     pub fn set_jurisdiction_flag(env: Env, admin: Address, flag: Address) -> Result<(), Error> {
+        compliance_pausable::require_not_paused_or(&env, Error::ContractPaused)?;
         Self::require_admin(&env, &admin)?;
         env.storage()
             .instance()

@@ -19,6 +19,18 @@ pub struct Metadata {
     pub admin: Address,
 }
 
+#[contractevent]
+pub struct Frozen {
+    #[topic]
+    pub admin: Address,
+}
+
+#[contractevent]
+pub struct Unfrozen {
+    #[topic]
+    pub admin: Address,
+}
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -48,12 +60,20 @@ impl CircuitBreaker {
     pub fn freeze(env: Env, admin: Address) -> Result<(), Error> {
         Self::require_admin(&env, &admin)?;
         env.storage().instance().set(&DataKey::Frozen, &true);
+        Frozen {
+            admin: admin.clone(),
+        }
+        .publish(&env);
         Ok(())
     }
 
     pub fn unfreeze(env: Env, admin: Address) -> Result<(), Error> {
         Self::require_admin(&env, &admin)?;
         env.storage().instance().set(&DataKey::Frozen, &false);
+        Unfrozen {
+            admin: admin.clone(),
+        }
+        .publish(&env);
         Ok(())
     }
 

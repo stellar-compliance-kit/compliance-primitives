@@ -139,6 +139,121 @@ that is guaranteed not to collide with any address-keyed persistent storage.
 if a shared crate proved impractical. It proved practical, so duplication was
 not needed.
 
+## Complete End-to-End Wiring Example
+
+A copy-pasteable minimal example contract showing all five wiring steps applied end-to-end (see also [`examples/pausable-consumer`](../examples/pausable-consumer)):
+
+### 1. `Cargo.toml`
+```toml
+[dependencies]
+soroban-sdk = { workspace = true }
+compliance-pausable = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+compliance-pausable = { workspace = true, features = ["testutils"] }
+```
+
+### 2. Contract Code (`src/lib.rs`)
+```rust
+#![no_std]
+
+use soroban_sdk::{
+    contract, contracterror, contractevent, contractimpl, contracttype, Address, Env, String,
+};
+
+// Step 1: Error Variant
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum Error {
+    NotInitialized = 1,
+    AlreadyInitialized = 2,
+    NotAuthorized = 3,
+    ContractPaused = 4, // <-- Added for pausable support
+}
+
+// Step 2: Events
+#[contractevent]
+pub struct Paused {
+    #[topic]
+    pub admin: Address,
+}
+
+#[contractevent]
+pub struct Unpaused {
+    #[topic]
+    pub admin: Address,
+}
+
+#[contracttype]
+#[derive(Clone)]
+enum DataKey {
+    Admin,
+    StoredValue,
+}
+
+#[contract]
+pub struct MinimalPausableContract;
+
+#[contractimpl]
+impl MinimalPausableContract {
+    pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
+        if env.storage().instance().has(&DataKey::Admin) {
+            return Err(Error::AlreadyInitialized);
+        }
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Admin, &admin);
+        Ok(())
+    }
+
+    // Step 3: Admin-gated pause / unpause / is_paused methods
+    pub fn pause(env: Env, admin: Address) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        compliance_pausable::pause(&env);
+        Paused { admin }.publish(&env);
+        Ok(())
+    }
+
+    pub fn unpause(env: Env, admin: Address) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        compliance_pausable::unpause(&env);
+        Unpaused { admin }.publish(&env);
+        Ok(())
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        compliance_pausable::is_paused(&env)
+    }
+
+    // Step 4: Guard placement on every state-mutating method
+    pub fn set_value(env: Env, admin: Address, new_value: u32) -> Result<(), Error> {
+        compliance_pausable::require_not_paused(&env, Error::ContractPaused)?;
+        Self::require_admin(&env, &admin)?;
+        env.storage().instance().set(&DataKey::StoredValue, &new_value);
+        Ok(())
+    }
+
+    // Step 5: Read-only query methods deliberately NOT gated
+    pub fn get_value(env: Env) -> u32 {
+        env.storage().instance().get(&DataKey::StoredValue).unwrap_or(0)
+    }
+
+    fn require_admin(env: &Env, admin: &Address) -> Result<(), Error> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        if stored_admin != *admin {
+            return Err(Error::NotAuthorized);
+        }
+        Ok(())
+    }
+}
+```
+
 ## Testing
 
 Each contract's test module gains dedicated pausable tests covering:
@@ -153,3 +268,4 @@ Each contract's test module gains dedicated pausable tests covering:
 
 `compliance-pausable` itself has unit tests that exercise all four helpers
 against a stub contract.
+
