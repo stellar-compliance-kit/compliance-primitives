@@ -173,7 +173,7 @@ pub enum Error {
     NotAuthorized = 3,
     NoChecksRegistered = 4,
     EmptyAddressList = 5,
-    ContractPaused = 6,
+    BatchTooLarge = 6,
 }
 
 // ---------------------------------------------------------------------------
@@ -185,6 +185,12 @@ pub struct ComplianceAggregator;
 
 #[contractimpl]
 impl ComplianceAggregator {
+    /// Maximum number of addresses accepted by `batch_check` in a single
+    /// call. Bounds the per-transaction cross-contract call fan-out (each
+    /// address costs up to two nested calls) so a single invocation cannot
+    /// exceed the host's resource budget.
+    pub const MAX_BATCH_SIZE: u32 = 100;
+
     // -----------------------------------------------------------------------
     // Lifecycle
     // -----------------------------------------------------------------------
@@ -485,6 +491,66 @@ impl ComplianceAggregator {
         }
 
         Ok(batch)
+    }
+
+    /// Lightweight batched entrypoint: evaluates the configured policy for
+    /// each address in `addresses` and returns only the pass/fail booleans,
+    /// in the same order as the input, for issuers who don't need the
+    /// per-check breakdown that `check_all` provides.
+    ///
+    /// `allowed_jurisdictions` is forwarded to the `jurisdiction-flag` check
+    /// exactly as in `check_address`/`check_all`, so a registered jurisdiction
+    /// check is still fully evaluated here (it is not skipped).
+    ///
+    /// Guards against unbounded batches (and the associated cross-contract
+    /// call fan-out) with `MAX_BATCH_SIZE`. Returns
+    /// `Error::EmptyAddressList` for an empty input and
+    /// `Error::BatchTooLarge` if `addresses.len() > MAX_BATCH_SIZE`.
+    pub fn batch_check(
+        env: Env,
+        addresses: Vec<Address>,
+        allowed_jurisdictions: Vec<String>,
+    ) -> Result<Vec<bool>, Error> {
+        if addresses.is_empty() {
+            return Err(Error::EmptyAddressList);
+        }
+        if addresses.len() > Self::MAX_BATCH_SIZE {
+            return Err(Error::BatchTooLarge);
+        }
+
+        let gate_addr: Option<Address> = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::DenylistGate);
+        let flag_addr: Option<Address> = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::JurisdictionFlag);
+
+        if gate_addr.is_none() && flag_addr.is_none() {
+            return Err(Error::NoChecksRegistered);
+        }
+
+        let mut results: Vec<bool> = Vec::new(&env);
+
+        for address in addresses.iter() {
+            let mut all_passed = true;
+
+            if let Some(ref ga) = gate_addr {
+                let client = DenylistGateClient::new(&env, ga);
+                all_passed = all_passed && client.check(&address);
+            }
+
+            if let Some(ref fa) = flag_addr {
+                let client = JurisdictionFlagClient::new(&env, fa);
+                all_passed =
+                    all_passed && client.is_permitted_jurisdiction(&address, &allowed_jurisdictions);
+            }
+
+            results.push_back(all_passed);
+        }
+
+        Ok(results)
     }
 
     // -----------------------------------------------------------------------
