@@ -9,3 +9,7 @@ memory = 1
 [jurisdiction-flag.is_permitted_jurisdiction]
 cpu = 1
 memory = 1
+
+[policy-engine.evaluate]
+cpu = 1
+memory = 1

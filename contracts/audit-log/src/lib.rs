@@ -248,17 +248,17 @@ impl AuditLog {
             .unwrap_or(0u64)
     }
 
-    fn require_admin(env: &Env, admin: &Address) -> Result<(), Error> {
-        admin.require_auth();
-        let stored_admin: Address = env
-            .storage()
+    /// Return the configured admin address, following the same read-back
+    /// pattern as `get_admin` on `allowlist-token`/`denylist-gate` and
+    /// `get_issuer` on `jurisdiction-flag`.
+    ///
+    /// Returns `Error::NotInitialized` if `initialize` has not been called
+    /// yet.
+    pub fn get_admin(env: Env) -> Result<Address, Error> {
+        env.storage()
             .instance()
             .get(&DataKey::Admin)
-            .ok_or(Error::NotInitialized)?;
-        if stored_admin != *admin {
-            return Err(Error::NotAuthorized);
-        }
-        Ok(())
+            .ok_or(Error::NotInitialized)
     }
 }
 
