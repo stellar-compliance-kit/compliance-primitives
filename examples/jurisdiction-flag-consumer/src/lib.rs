@@ -1,19 +1,40 @@
 //! Reference example: a minimal token contract that composes
 //! `jurisdiction-flag` via cross-contract call. This crate is not meant to be
 //! deployed as-is — it exists to show the calling pattern other issuers'
-//! token contracts should follow.
+//! token contracts should follow: call `is_permitted_jurisdiction()` on the
+//! flag for addresses subject to jurisdiction restrictions before mutating
+//! any balances, and abort the transfer if the check fails.
 //!
 //! **Composition choice**: `transfer` checks only the **sender's** jurisdiction
 //! against the configured `allowed_codes`. The sender is the party whose KYC /
 //! jurisdiction verification matters for outbound transfers; the recipient is
 //! not re-checked here (a receiving contract could apply its own policy).
 //!
+//! **Trait-based cross-contract calls**:
 //! Note this deliberately does NOT depend on the `jurisdiction-flag` crate
 //! directly: linking another contract's crate pulls its `#[contractimpl]`
 //! wasm exports into this binary too and the two export sets collide at
 //! link time. Instead, `FlagClient` below is generated from a trait that
 //! only describes the shape of the call — the standard pattern for calling
 //! a contract you don't own the source of in the same build.
+//!
+//! ## How to compose `jurisdiction-flag` into your token
+//!
+//! 1. **Resolve the flag's address** from this contract's own storage (set
+//!    once at `initialize`) rather than hardcoding it, so the same contract
+//!    code can point at different flag deployments.
+//! 2. **Build a `FlagClient`** for that address. `FlagClient` is generated
+//!    from the `JurisdictionFlagInterface` trait above, not from the
+//!    `jurisdiction-flag` crate itself (see above for why), so this step
+//!    works without a direct crate dependency.
+//! 3. **Call `is_permitted_jurisdiction()`** for the address(es) you want to
+//!    check, passing the list of allowed jurisdiction codes. Each call is a
+//!    cross-contract invocation into the deployed flag contract — the check
+//!    logic itself lives entirely in `jurisdiction-flag`, this contract just
+//!    asks it for a yes/no per address.
+//! 4. **Abort before mutating any balances** if the check fails. The check
+//!    must run and pass; failing the jurisdiction check is sufficient to
+//!    reject the transfer, and balances must stay untouched.
 #![no_std]
 
 use soroban_sdk::{contract, contractclient, contracterror, contractimpl, contracttype, Address, Env, String, Vec};

@@ -1,0 +1,29 @@
+name: Web links
+
+on:
+  pull_request:
+    paths:
+      - "web/**"
+      - "docs/interfaces/**"
+      - "scripts/check-web-links.mjs"
+      - "scripts/generate-interface-docs.mjs"
+      - ".github/workflows/web-links.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  link-check:
+    name: Check web links
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Generate interface docs
+        run: node scripts/generate-interface-docs.mjs
+      - name: Check internal links and warn on external links
+        run: node scripts/check-web-links.mjs
