@@ -1,107 +1,152 @@
-# Threat Model
+# Threat Model — Compliance Primitives
 
-This document enumerates and analyzes attack scenarios for each contract in
-the `compliance-primitives` workspace. Each scenario is rated for severity and
-likelihood, and cross-referenced to existing mitigations (tests, documented
-invariants, or pending issues).
+> Issue #112. This document enumerates and analyses **attack scenarios** for the
+> three compliance-critical contracts: `allowlist-token`, `denylist-gate`, and
+> `jurisdiction-flag`. It is distinct from SPEC.md (issue #29), which records
+> per-contract invariants and security assumptions for audit reference. The two
+> should be kept consistent: every invariant in SPEC.md should eventually have a
+> corresponding scenario + mitigation here, and vice-versa.
 
-Per-contract sections cover three threat categories:
+## Scope
 
-| Category | Description |
-|----------|-------------|
-| **Griefing** | Attacks that cost the victim resources or degrade service without directly stealing assets. |
-| **Front-running** | Attacks that exploit the ordering of operations within a ledger close. |
-| **Admin-key-compromise** | What a compromised privileged key can and cannot do, and how quickly damage can be bounded. |
+| Contract | Role |
+|----------|------|
+| `allowlist-token` | Wraps an underlying asset and gates `transfer` so only allowlisted addresses may send/receive. Admin-managed allowlist, pausable, two-step admin transfer. |
+| `denylist-gate` | Maintains a denylist; `check(address)` is consulted before sensitive operations. Admin-managed, with an optional multisig signer set and a compliance-officer role. |
+| `jurisdiction-flag` | Maps addresses → jurisdiction codes (with optional expiry). `is_permitted_jurisdiction` is the read gate. Issuer-managed, with a compliance-officer role and an `upgrade` entry point. |
 
----
+## Rating scale
 
-## allowlist-token
+Severity × Likelihood → priority.
 
-### Griefing
-
-| Scenario | Severity | Likelihood | Mitigation |
-|----------|----------|------------|------------|
-| **Repeated `is_allowed` calls** — an attacker calls `is_allowed` many times to run up resource fees paid by the contract itself. | Low | Low | In Soroban the **caller** pays resource fees, not the contract. Each `is_allowed` invocation costs the caller a small fee and does not write to storage, so the economic burden falls on the attacker. No contract-side drain is possible. |
-| **Repeated `transfer` with non-allowlisted addresses** — an attacker repeatedly calls `transfer` from a non-allowlisted address, consuming event-emission resources. | Low | Low | Same caller-pays argument. `transfer` returns `Ok(false)` early without touching the underlying token, so the only cost is the caller's fee for a read + event emission. |
-| **Storage junk via `DataKey` writes** — an attacker fills storage with junk `Allowed(Address)` entries. | N/A | N/A | Only the admin can call `add_to_allowlist`/`remove_from_allowlist` (gated by `require_admin`). There is no public write path. See [`contracts/allowlist-token/src/lib.rs`](../contracts/allowlist-token/src/lib.rs:83-100). |
-
-### Front-running
-
-| Scenario | Severity | Likelihood | Mitigation |
-|----------|----------|------------|------------|
-| **Re-ordering `add_to_allowlist` and `transfer`** — an attacker submits a `transfer` in the same ledger as `add_to_allowlist` for the same address. If the validator orders `transfer` before `add_to_allowlist`, the `transfer` returns `Ok(false)` and is blocked. | Low | Low | The worst outcome is a benign transfer being blocked until the next ledger — no funds move, no state changes incorrectly. The `Blocked` event is always emitted regardless of ordering, so the event is audit trail survives. If `transfer` goes through before a *removal*, the funds move while the address was still allowlisted, which is correct behavior (the removal applies from the next ledger). |
-| **Re-ordering `remove_from_allowlist` and `transfer`** — if a validator reorders to run `transfer` before the removal succeeds, the transfer completes while the address is still allowlisted. | Medium | Low | The admin should view removal as applying "as of the next ledger." A malicious validator can only create a one-ledger window. For higher-stakes removals, see [Admin key compromise](#admin-key-compromise) below. |
-
-### Admin key compromise
-
-| Scenario | Severity | Likelihood | Mitigation |
-|----------|----------|------------|------------|
-| **Compromised admin adds arbitrary addresses to allowlist** — an attacker controlling the admin key can approve any address to send/receive the token. This does **not** let the attacker steal funds from others, because `transfer` still requires `from.require_auth()`. | High | Medium | `transfer` at [`contracts/allowlist-token/src/lib.rs:120`](../contracts/allowlist-token/src/lib.rs:120) requires the sender's auth via `from.require_auth()`. The admin cannot impersonate a user. See **test**: `test_transfer_forwards_to_underlying_token_when_both_allowlisted` in [`contracts/allowlist-token/src/test.rs:48`](../contracts/allowlist-token/src/test.rs:48). |
-| **Compromised admin removes all addresses from allowlist** — a denial-of-service that blocks all transfers through the wrapper. | High | Medium | There is no per-address cooldown or rate limit on removals. **Mitigations pending:** [#74/#75/#76](https://github.com/stellar-compliance-kit/compliance-primitives/issues/74) (two-step admin transfer), [#84/#85](https://github.com/stellar-compliance-kit/compliance-primitives/issues/84) (pause capability). Once pause lands, the rightful admin can pause the contract to stop further damage while key recovery proceeds. See [SPEC.md invariants](SPEC.md) (issue #29). |
-| **Compromised admin upgrades the contract to malicious code** — with the `upgrade()` function (added in [#113](https://github.com/stellar-compliance-kit/compliance-primitives/issues/113)), an attacker who controls the admin key can replace the contract WASM with arbitrary code. | Critical | Medium | The `upgrade()` function is gated by the same `require_admin` pattern as all other admin operations (see [`contracts/allowlist-token/src/lib.rs:149`](../contracts/allowlist-token/src/lib.rs:149)). There is no timelock or multi-sig requirement. **Mitigations pending:** A timelock or multi-sig requirement on `upgrade()` would turn a single key compromise from a total-loss event into a bounded-risk event during the timelock window. See also [SPEC.md](SPEC.md) (issue #29). |
-| **Compromised admin reads the wrapped token address** — the admin can read `DataKey::Token` from instance storage, but this address is already learnable from the deploy transaction history. | Low | Low | The token address in storage provides no additional attack surface; the underlying token's own security model applies independently. |
+- **Severity**: Impact if the scenario succeeds (High = loss of funds / compliance bypass; Med = denial of service / griefing cost; Low = minor).
+- **Likelihood**: How easily an external attacker (not the admin) can trigger it on Stellar/Soroban (High = no special access; Low = requires compromised/admin key).
+- Mitigations are cross-referenced to a **function** (already implemented), a **test** (`contracts/<c>/src/test.rs`), or a **pending issue** (mitigation not yet landed).
 
 ---
 
-## denylist-gate
+## 1. `allowlist-token`
 
-### Griefing
+### Trust model
+- `admin` controls the allowlist and can pause. Transferred via two-step
+  `propose_admin` / `accept_admin` (#74/#75/#76).
+- `transfer(from, to, amount)` is gated: both `from` and `to` must be allowlisted
+  (`is_allowed`). 
 
-| Scenario | Severity | Likelihood | Mitigation |
-|----------|----------|------------|------------|
-| **Repeated `check` calls** — an attacker calls `check(address)` many times to exhaust resources. | Low | Low | Caller pays fees. `check` is a read-only function with no writes. |
-| **Storage junk via `DataKey` writes** — an attacker fills storage with junk `Denied(Address)` entries. | N/A | N/A | Only the admin can write via `add_to_denylist`/`remove_from_denylist`. See [`contracts/denylist-gate/src/lib.rs:66-83`](../contracts/denylist-gate/src/lib.rs:66-83). |
+### 1.1 Griefing
+| ID | Scenario | Sev | Lik | Mitigation |
+|----|----------|-----|-----|------------|
+| A1 | **Read-function resource-fee griefing** — `is_allowed` / `metadata` are public reads. An attacker repeatedly calls them to run up *their own* resource fees (Soroban charges the caller), so this only hurts the attacker; however, if a downstream contract calls `is_allowed` on behalf of a user, the griefer can force that contract to burn fees. | Low | High | None beyond Soroban's per-call fee model. Documented as accepted risk; consider caching/rate-limit in caller contracts. |
+| A2 | **Denial via pause** — a compromised or reckless admin calls `pause`, freezing all transfers. | Med | Low | `unpause` by admin; two-step admin transfer (#74/#75/#76) limits how a key is swapped. Pause capability tracked in #84/#85. |
+| A3 | **Allowlist churn** — admin removes a legit `from`/`to` mid-flight, causing in-progress transfers to fail. | Med | Low | `remove_from_allowlist` is admin-only; no non-admin write path exists, so storage cannot be filled by outsiders. |
 
-### Front-running
+**Storage-fill check**: `add_to_allowlist` / `remove_from_allowlist` are admin-only
+(`admin` arg required + checked). There is **no** function that lets a non-admin
+write a `DataKey`, so the "fill storage with junk entries" griefing class does
+not apply. (Confirmed by reading `lib.rs`: all write entry points require `admin`.)
 
-| Scenario | Severity | Likelihood | Mitigation |
-|----------|----------|------------|------------|
-| **Re-ordering `add_to_denylist` and a consumer's `transfer`** — a validator orders the `transfer` before the `add_to_denylist` call, allowing a transfer to clear even though the sender was being added to the denylist in the same ledger. | Medium | Low | The denylist admin should assume a one-ledger delay between submitting `add_to_denylist` and it taking effect. The consuming contract can add its own front-running mitigations (e.g., checking a recent ledger sequence). |
-| **Re-ordering `remove_from_denylist` and a consumer's `transfer`** — if the removal is ordered after the transfer, a denied address might have their transfer blocked even though the removal was submitted. | Low | Low | The denied address benefits from this ordering — the transfer is blocked when it shouldn't have been. The address can retry in the next ledger. |
+### 1.2 Front-running
+| ID | Scenario | Sev | Lik | Mitigation |
+|----|----------|-----|-----|------------|
+| A4 | **Add-vs-transfer ordering** — within a single ledger close, does an attacker benefit from `add_to_allowlist(victim)` landing before/after a `transfer`? `transfer` reads `is_allowed` at execution time, so a victim added then transferred in the same ledger is allowlisted for that transfer. This is the *intended* behavior (admin pre-authorizes). The risk is an admin racing a `remove_from_allowlist` *after* a queued `transfer` — the transfer still executes because it was already validated. | Med | Med | Acceptable: admin actions are authoritative by design. Mitigated by two-step admin (#74/#75/#76) and audit logging (issue #… audit-log contract). |
+| A5 | **Two-step admin race** — `propose_admin` then `accept_admin` by the attacker before a legit `accept_admin`. Two-step design means the *new* admin must explicitly `accept_admin`, so an attacker cannot complete the transfer unilaterally. | Low | Low | `propose_admin`/`accept_admin` (#74/#75/#76). |
 
-### Admin key compromise
-
-| Scenario | Severity | Likelihood | Mitigation |
-|----------|----------|------------|------------|
-| **Compromised admin adds all addresses to denylist** — effectively halts all token transfers that consult this denylist. | High | Medium | No per-address rate limit. Consuming contracts can fall back to secondary denylist checks or pause if multiple gates disagree. **Mitigations pending:** [#84/#85](https://github.com/stellar-compliance-kit/compliance-primitives/issues/84) pause capability. |
-| **Compromised admin removes all denylist entries** — allows previously-sanctioned addresses to transact freely. | High | Medium | The damage is immediate and total. Off-chain monitoring of `DenyRemove` events is the primary detection mechanism. Event emissions are guaranteed by the contract (see [`contracts/denylist-gate/src/lib.rs:71`](../contracts/denylist-gate/src/lib.rs:71) and [`contracts/denylist-gate/src/lib.rs:81`](../contracts/denylist-gate/src/lib.rs:81)). |
-| **Compromised admin adds/removes individual high-value addresses** — targeted sanction evasion. | High | High | Same event-based detection applies. A real deployment should couple the admin key with a multi-sig or governance process. |
-
----
-
-## jurisdiction-flag
-
-### Griefing
-
-| Scenario | Severity | Likelihood | Mitigation |
-|----------|----------|------------|------------|
-| **Repeated `get_jurisdiction` calls** — attacker repeatedly reads jurisdiction data. | Low | Low | Caller pays fees. Read-only function. |
-| **Repeated `is_permitted_jurisdiction` calls** — same as above, but iterates over a `Vec<String>`. | Low | Low | Caller pays fees. The iteration cost scales with `allowed_codes.len()`, which is chosen by the caller (or their caller in a composition chain) — the cost is proportional to input. |
-| **Storage junk via `DataKey` writes** — an attacker fills storage with junk `Jurisdiction(Address)` entries. | N/A | N/A | Only the issuer can write via `set_jurisdiction`. See [`contracts/jurisdiction-flag/src/lib.rs:62-74`](../contracts/jurisdiction-flag/src/lib.rs:62-74). |
-
-### Front-running
-
-| Scenario | Severity | Likelihood | Mitigation |
-|----------|----------|------------|------------|
-| **Re-ordering `set_jurisdiction` and a consumer's compliance check** — if a validator orders the consumer's `is_permitted_jurisdiction` call before `set_jurisdiction`, an address that just completed jurisdiction verification is still treated as unverified for one ledger. | Low | Low | The address can retry in the next ledger. No assets are at risk — the check is purely a gating function. |
-| **Re-ordering a jurisdiction-change removal** — if an address's jurisdiction is being changed from "US" to "CA", a consumer call reordered before the update sees the old value. | Low | Low | Again, a one-ledger window. If the check passes with the old jurisdiction, the behavior is correct (the update takes effect from the next ledger). |
-
-### Admin (issuer) key compromise
-
-| Scenario | Severity | Likelihood | Mitigation |
-|----------|----------|------------|------------|
-| **Compromised issuer sets arbitrary jurisdiction codes** — an attacker can assign any jurisdiction code to any address, bypassing off-chain KYC/onboarding. | High | Medium | There is no on-chain mechanism to verify jurisdiction claims — the contract assumes the issuer performs off-chain verification before calling `set_jurisdiction`. Event-based monitoring of `JurisdictionSet` events is the detection mechanism. See [`contracts/jurisdiction-flag/src/lib.rs:72`](../contracts/jurisdiction-flag/src/lib.rs:72). |
-| **Compromised issuer removes all jurisdictions (by not re-setting them)** — this is not a single function call but the effect of refusing to set jurisdictions. The actual damage depends on whether consuming contracts treat `None` as "denied" or "permitted." | Medium (varies) | Low | `is_permitted_jurisdiction` correctly returns `false` when no jurisdiction is set (see [`contracts/jurisdiction-flag/src/lib.rs:85-87`](../contracts/jurisdiction-flag/src/lib.rs:85-87)), which means consuming contracts will block addresses with no jurisdiction. This is the safe-by-default behavior. **Test**: `test_is_permitted_jurisdiction_false_when_no_jurisdiction_set` in [`contracts/jurisdiction-flag/src/test.rs:56`](../contracts/jurisdiction-flag/src/test.rs:56). |
-| **Compromised issuer upgrades the contract** — with the `upgrade()` function (added in [#27](https://github.com/stellar-compliance-kit/compliance-primitives/issues/27)), an attacker who controls the issuer key can replace the contract WASM with arbitrary code. | Critical | Medium | Same assessment as allowlist-token's upgrade path. No timelock or multi-sig. **Mitigations pending:** A timelock or multi-sig on `upgrade()` would bound the damage. |
+### 1.3 Admin-key compromise
+| ID | Scenario | Sev | Lik | Mitigation |
+|----|----------|-----|-----|------------|
+| A6 | Compromised `admin` adds attacker addresses to the allowlist, enabling illicit transfers of the wrapped asset. | High | Low | Bounded by `pause` (#84/#85) + two-step admin recovery (#74/#75/#76). Once #74/#75/#76 and #84/#85 land, a new admin can be proposed and the contract paused within one ledger. |
+| A7 | Compromised `admin` calls `pause` permanently to extort/DoS. | Med | Low | Recovery requires admin key rotation (#74/#75/#76); consider a time-locked unpause or guardian (future issue). |
 
 ---
 
-## Cross-cutting concerns
+## 2. `denylist-gate`
 
-| Concern | Applicable contracts | Notes |
-|---------|---------------------|-------|
-| **Event-based monitoring** | All three | All state-mutating operations emit events (`AllowAdd`, `AllowRemove`, `Blocked`, `DenyAdd`, `DenyRemove`, `JurisdictionSet`). Off-chain monitoring of these events is the primary detection mechanism for both legitimate use and attacker activity. |
-| **Caller-pays resource fees** | All three | Soroban's fee model means griefing via public read functions is not economically viable — the attacker bears the cost. |
-| **Upgrade authority** | allowlist-token, jurisdiction-flag | Both contracts now have an `upgrade()` function gated behind the admin/issuer key. There is no timelock. See [#113](https://github.com/stellar-compliance-kit/compliance-primitives/issues/113) and [#27](https://github.com/stellar-compliance-kit/compliance-primitives/issues/27). |
-| **Pause capability** | All three (pending) | [#84/#85](https://github.com/stellar-compliance-kit/compliance-primitives/issues/84) would let an admin pause the contract, bounding the damage window of a compromised key that is detected quickly. |
-| **Two-step admin transfer** | All three (pending) | [#74/#75/#76](https://github.com/stellar-compliance-kit/compliance-primitives/issues/74) would replace single-step admin changes with a two-step commit pattern, reducing the risk of accidental or malicious admin changes. |
+### Trust model
+- `admin` manages the denylist (`add_to_denylist`, `remove_from_denylist`,
+  `remove_multiple_from_denylist`) and a `compliance_officer` role.
+- Optional `multisig` signer set (`initialize_multisig`, `add_signer`,
+  `remove_signer`) can gate admin actions.
+- `check(address)` is the read gate consulted by integrators.
+
+### 2.1 Griefing
+| ID | Scenario | Sev | Lik | Mitigation |
+|----|----------|-----|-----|------------|
+| D1 | **Read griefing** — `check` is a public read; same fee model as A1. Low impact (caller pays). | Low | High | Accepted; caller contracts should cache. |
+| D2 | **Mass removal griefing** — `remove_multiple_from_denylist` by a compromised admin wipes the denylist, unblocking sanctioned addresses. | High | Low | `multisig` signers can require >1 approval; `pause` (admin) halts integrators' `check` usage if they honor pause. |
+
+**Storage-fill check**: all denylist writes are admin/compliance-officer only. No
+non-admin write path → storage-fill griefing not applicable.
+
+### 2.2 Front-running
+| ID | Scenario | Sev | Lik | Mitigation |
+|----|----------|-----|-----|------------|
+| D3 | **Denylist-vs-action ordering** — within a ledger close, an attacker may try to land a `transfer`/compliance-gated action *before* `add_to_denylist(attacker)` is committed. Conversely, a compliance officer removing an address right before a blocked action. Because `check` is evaluated at action execution, a denylist added in the same ledger blocks the action; a removal unblocks it. | High | Med | Integrators must call `check` and perform the gated action in the *same* transaction (atomic), or accept one-ledger TOCTOU. Recommend a `require_not_denied` hook invoked inside the gated entry point. Tracked as a future hardening issue. |
+| D4 | **Multisig signer race** — `add_signer`/`remove_signer` by a single compromised signer. | Med | Low | Multisig threshold (set in `initialize_multisig`). |
+
+### 2.3 Admin-key compromise
+| ID | Scenario | Sev | Lik | Mitigation |
+|----|----------|-----|-----|------------|
+| D5 | Compromised `admin` or `compliance_officer` removes sanctioned addresses → compliance bypass. | High | Low | Bounded by `multisig` (needs threshold of signers) and `pause`. Until #84/#85 pause lands for this contract, recovery depends on multisig threshold. |
+| D6 | Compromised `admin` drains the signer set (`remove_signer`) to centralize control. | Med | Low | `multisig` threshold; propose a timelock on signer removal (future issue). |
+
+---
+
+## 3. `jurisdiction-flag`
+
+### Trust model
+- `issuer` sets jurisdiction codes (`set_jurisdiction`, `set_jurisdiction_until`,
+  `remove_jurisdiction_multiple`) and holds the sole `upgrade` key.
+- `compliance_officer` role can also set/revoke flags.
+- `is_permitted_jurisdiction` is the read gate.
+- **`upgrade(env, issuer, new_wasm)` already exists** — relevant to #113.
+
+### 3.1 Griefing
+| ID | Scenario | Sev | Lik | Mitigation |
+|----|----------|-----|-----|------------|
+| J1 | **Read griefing** — `get_jurisdiction` / `is_permitted_jurisdiction` public reads; caller-pays. Low. | Low | High | Accepted. |
+| J2 | **Expiry griefing** — `set_jurisdiction_until` with a past timestamp silently disables a flag, unblocking an address. | Med | Low | `issuer`/`compliance_officer`-only; pair with audit-log contract for review. |
+
+**Storage-fill check**: all flag writes require `issuer` or `compliance_officer`.
+No non-admin write path → storage-fill griefing not applicable.
+
+### 3.2 Front-running
+| ID | Scenario | Sev | Lik | Mitigation |
+|----|----------|-----|-----|------------|
+| J3 | **Flag-vs-permit ordering** — within a ledger close, an attacker attempts a gated action before `set_jurisdiction(attacker, blocked)` commits, or a compliance officer clears a flag before a blocked action. Same TOCTOU as D3. | High | Med | Call `is_permitted_jurisdiction` atomically inside the gated action. Future hardening issue. |
+| J4 | **Expiry race** — `set_jurisdiction_until` landing just before a check passes. | Med | Med | Atomic check recommended; `remove_jurisdiction_multiple` should be preferred for hard blocks. |
+
+### 3.3 Admin-key compromise
+| ID | Scenario | Sev | Lik | Mitigation |
+|----|----------|-----|-----|------------|
+| J5 | Compromised `issuer` rewrites jurisdiction flags to bypass jurisdiction rules. | High | Low | Recovery via `compliance_officer` + (pending) pause/#84/#85. Note: **`upgrade` is issuer-only with no multisig/timelock**, so a compromised `issuer` can also deploy arbitrary `new_wasm` — see J6. |
+| J6 | **Compromised `issuer` calls `upgrade` with malicious `new_wasm`** → total contract takeover / fund theft in integrators. | Critical | Low | **No current mitigation.** This is exactly why #113 (upgradeability pattern / migration path) matters: a safe upgrade must be (a) two-step (propose + delay + accept), (b) timelocked so a watchguard can pause, and (c) ideally gated by `multisig-admin`. Until #113 lands, `upgrade` is a single-point-of-catastrophe key. |
+
+---
+
+## Cross-cutting observations
+
+1. **No non-admin storage writes** in any of the three contracts — the
+   storage-fill griefing class called out in the issue does not apply. Good.
+2. **Front-running is the highest real risk** for all three: `check` /
+   `is_permitted_jurisdiction` are read separately from the gated action, so a
+   one-ledger TOCTOU window exists. Recommend an in-transaction hook
+   (`require_not_denied` / `require_permitted`) rather than relying on callers to
+   call the read then the action.
+3. **Pause (#84/#85) and two-step admin (#74/#75/#76)** are the primary
+   blast-radius limiters for admin compromise; several scenarios above assume
+   they have landed. Track their merge before relying on A6/A7/D5/J5 mitigations.
+4. **`jurisdiction-flag::upgrade` is the most dangerous single key** (J6). #113
+   should introduce a delayed, reviewable upgrade before mainnet use.
+
+## Open questions / follow-ups
+- Should `check` / `is_permitted_jurisdiction` be made callable only as an
+  in-transaction hook (remove the standalone read path)? 
+- Do `allowlist-token` and `denylist-gate` also need an `upgrade` entry point
+  (covered by #113 / #114)? They currently lack one.
+- Confirm whether `denylist-gate` has a duplicate `add_to_denylist`
+  declaration (observed at `lib.rs:161` and `lib.rs:189`) — if real, that is a
+  compile error to fix separately.
+
+*Severity/likelihood ratings are the author's best judgment from reading the
+current `main` and should be reviewed by at least one other contributor before
+merge, as required by the issue's acceptance criteria.*
