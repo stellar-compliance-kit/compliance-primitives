@@ -18,3 +18,6 @@ Cargo.lock.bak
 .vscode/
 .idea/
 *.iml
+
+# Node tooling (scripts/check-accessibility.mjs) — see package.json.
+node_modules/

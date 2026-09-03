@@ -123,7 +123,7 @@ pub enum Error {
 /// contracts that want to cross-call `audit-log.record(...)` should define
 /// this same trait locally (or depend on this crate's `rlib`) and use the
 /// generated client rather than linking the full contract binary.
-#[contractclient(name = "AuditLogClient")]
+#[contractclient(name = "AuditLogInterfaceClient")]
 pub trait AuditLogInterface {
     fn record(
         env: Env,
@@ -161,6 +161,27 @@ impl AuditLog {
         Ok(())
     }
 
+    /// Pause all write operations. Admin-only.
+    pub fn pause(env: Env, admin: Address) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        compliance_pausable::pause(&env);
+        env.events().publish((), soroban_sdk::symbol_short!("Paused"));
+        Ok(())
+    }
+
+    /// Resume write operations after a pause. Admin-only.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        compliance_pausable::unpause(&env);
+        env.events().publish((), soroban_sdk::symbol_short!("Unpaused"));
+        Ok(())
+    }
+
+    /// Check if the contract is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        compliance_pausable::is_paused(&env)
+    }
+
     /// Append a compliance event to the log.
     ///
     /// `source` must authorize this call (i.e. the calling contract must
@@ -174,6 +195,8 @@ impl AuditLog {
         subject: Address,
         detail: String,
     ) -> Result<(), Error> {
+        compliance_pausable::require_not_paused_or(&env, Error::ContractPaused)?;
+
         // Contract must be initialized before accepting entries.
         if !env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::NotInitialized);
