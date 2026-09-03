@@ -138,6 +138,20 @@ pub enum CombineOp {
     Any,
 }
 
+/// The full configured policy tree returned by [`PolicyEngine::get_policy`].
+///
+/// Bundles the combination operator together with the ordered list of checks
+/// so that off-chain tooling and auditors can inspect everything about the
+/// current policy in a single call.
+#[contracttype]
+#[derive(Clone)]
+pub struct PolicyNode {
+    /// How the results of `checks` are combined during evaluation.
+    pub op: CombineOp,
+    /// Ordered list of compliance checks the engine runs on every transfer.
+    pub checks: Vec<CheckKind>,
+}
+
 #[contracttype]
 #[derive(Clone)]
 enum DataKey {
@@ -504,6 +518,29 @@ impl PolicyEngine {
             .instance()
             .get(&DataKey::CombineOp)
             .ok_or(Error::NotInitialized)
+    }
+
+    /// Returns the full configured policy tree as a [`PolicyNode`].
+    ///
+    /// Off-chain tooling and auditors can call this single view to read back
+    /// everything needed to understand and reproduce the policy that a
+    /// deployed instance will evaluate, without having to reconstruct it from
+    /// deployment transaction history.
+    ///
+    /// Returns `Err(Error::NotInitialized)` if the contract has not yet been
+    /// initialized.
+    pub fn get_policy(env: Env) -> Result<PolicyNode, Error> {
+        let op: CombineOp = env
+            .storage()
+            .instance()
+            .get(&DataKey::CombineOp)
+            .ok_or(Error::NotInitialized)?;
+        let checks: Vec<CheckKind> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Checks)
+            .ok_or(Error::NotInitialized)?;
+        Ok(PolicyNode { op, checks })
     }
 
     // -----------------------------------------------------------------------
