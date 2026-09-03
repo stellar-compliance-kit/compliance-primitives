@@ -1,0 +1,24 @@
+[package]
+name = "circuit-breaker-policy-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Example: wiring circuit-breaker as a pre-check in policy-engine evaluation."
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+circuit-breaker = { path = "../../contracts/circuit-breaker", features = ["testutils"] }
+policy-engine = { path = "../../contracts/policy-engine", features = ["testutils"] }
+denylist-gate = { path = "../../contracts/denylist-gate", features = ["testutils"] }
+
+[features]
+testutils = ["soroban-sdk/testutils"]

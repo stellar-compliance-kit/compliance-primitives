@@ -20,15 +20,27 @@ having to know that contract's specific function names or argument shapes.
 
 ## Motivation
 
-Today, three compliance-primitive contracts exist in the
-[`compliance-primitives`](https://github.com/stellar-compliance-kit/compliance-primitives)
-workspace:
+The [`compliance-primitives`](https://github.com/stellar-compliance-kit/compliance-primitives)
+workspace provides nine contracts that implement compliance capabilities for token issuers:
+
+### Core compliance gates (original three)
 
 | Contract | Check function | Signature | Meaning of `true` |
 |----------|---------------|-----------|-------------------|
 | `denylist-gate` | `check` | `(Env, Address) -> bool` | Address is NOT denied |
 | `allowlist-token` | `is_allowed` | `(Env, Address) -> bool` | Address is allowlisted |
 | `jurisdiction-flag` | `is_permitted_jurisdiction` | `(Env, Address, Vec<String>) -> bool` | Address's jurisdiction is in the allowed set |
+
+### Composition and orchestration (newer six)
+
+| Contract | Purpose | Relevant to `is_compliant` |
+|----------|---------|--------------------------|
+| `compliance-aggregator` | Batches multiple compliance checks into a single call, reducing cross-contract call overhead | Yes — can wrap aggregated results in `is_compliant` |
+| `policy-engine` | Composes checks using AND/OR logic and manages policy rules that evolve without redeployment | Yes — evaluates compliance policies, can expose `is_compliant` interface |
+| `audit-log` | Provides an append-only on-chain audit trail for compliance state changes | Not directly; records mutations made by other primitives |
+| `circuit-breaker` | Emergency freeze mechanism to halt operations globally during crisis | Not a compliance gate; acts as emergency control |
+| `pausable` | Shared library providing pause/unpause semantics reusable by all primitives | Not an interface; used internally by primitives for maintenance |
+| `multisig-admin` | M-of-N multisignature authorization for all primitives' admin operations | Not a compliance gate; secures admin actions |
 
 A consuming contract (or tooling such as a policy engine or an indexer) that
 wants to verify an address before permitting a transfer must know which of
@@ -48,6 +60,62 @@ different gate types, and new gate types may be created in the future.
 Standardizing the compliance-check interface — even as a single function —
 lets the ecosystem treat any compliance gate as a black box that answers
 "is this address permitted?" and compose against it generically.
+
+## The six newer contracts and SEP considerations
+
+The six newer contracts in the workspace extend the primitives ecosystem
+with composition, orchestration, and operational capabilities:
+
+### Composition and Policy
+
+**`policy-engine`** and **`compliance-aggregator`** both implement richer
+compliance logic on top of the core gates. Both **MUST** implement `is_compliant`
+to participate in the standardized interface:
+
+- **`compliance-aggregator`**: registers gates (e.g., allowlist, denylist) and
+  calls them in sequence, returning a single aggregated yes/no. Its `is_compliant`
+  wrapper returns `true` if all registered checks pass (AND logic).
+- **`policy-engine`**: stores admin-managed check rules (AND/OR trees) and evaluates
+  them against an address and caller-supplied `context`. Its `is_compliant` wrapper
+  evaluates the current policy. Policies can evolve without redeployment; a consumer
+  calling `policy-engine.is_compliant` today may receive a different answer tomorrow
+  if the admin updates the policy rules.
+
+**Key composition consideration**: When a `policy-engine` or `compliance-aggregator`
+sits upstream of the core gates, the `context` parameter may need to flow through
+the composition chain. For example, if a policy rule includes a `jurisdiction-flag`
+check, the caller must encode the allowed jurisdiction codes into `context` and
+pass it to `policy-engine.is_compliant`; the policy engine then extracts the
+jurisdiction portion and passes it to `jurisdiction-flag.is_compliant`. The encoding
+convention is gate-specific but must be documented by the policy engine at the
+point of use.
+
+### Audit, emergency control, and admin protection
+
+**`audit-log`**, **`circuit-breaker`**, and **`multisig-admin`** are not compliance
+gates themselves:
+
+- **`audit-log`**: records all mutations from any primitive (e.g., addresses added/removed
+  from allowlist/denylist, jurisdictions changed). Does not block or approve transfers;
+  used for compliance auditing and post-facto verification. Deployed separately and
+  registered by each primitive that wishes to emit audit records.
+- **`circuit-breaker`**: stores a global frozen flag. Consumed by integrated primitives
+  to halt all operations during crisis. Not a compliance gate; an emergency control.
+- **`multisig-admin`**: provides M-of-N authorization for primitive admin operations
+  (e.g., adding to denylist, setting jurisdiction). Can be set as the `admin` of any
+  primitive to require multiple signers. Not a compliance gate; a security wrapper.
+
+**Key composition consideration**: When `multisig-admin` or `circuit-breaker` is
+integrated into a primitive, the cost model changes (multisig adds one extra
+cross-contract call per admin op; circuit-breaker requires an extra read per
+state-mutating call), but the consumer-facing `is_compliant` interface is unchanged.
+
+### `pausable` library
+
+**`pausable`** is a Rust library crate (not a contract) that provides shared
+pause/unpause semantics reusable by all three core primitives. It is not part
+of the `is_compliant` interface; it is an internal implementation detail that
+allows each primitive to be paused without code duplication.
 
 ## Specification
 

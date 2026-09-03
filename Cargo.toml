@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "contracts/allowlist-token",
     "contracts/audit-log",
+    "contracts/compliance-aggregator",
     "contracts/denylist-gate",
     "contracts/jurisdiction-flag",
     "contracts/circuit-breaker",
@@ -10,6 +11,7 @@ members = [
     "contracts/compliance-aggregator",
     "contracts/multisig-admin",
     "examples/denylist-gate-consumer",
+    "examples/denylist-gate-sep41",
     "examples/jurisdiction-denylist-consumer",
     "examples/compliance-integration-flow",
 ]

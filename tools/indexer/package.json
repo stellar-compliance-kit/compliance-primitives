@@ -1,21 +1,57 @@
 {
   "name": "compliance-indexer",
   "version": "0.1.0",
-  "description": "Off-chain indexer for compliance-primitives contract events",
+  "description": "Off-chain indexer for compliance-primitives Soroban contract events",
   "type": "module",
-  "main": "dist/index.js",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/stellar-compliance-kit/compliance-primitives.git",
+    "directory": "tools/indexer"
+  },
+  "bugs": {
+    "url": "https://github.com/stellar-compliance-kit/compliance-primitives/issues"
+  },
+  "homepage": "https://github.com/stellar-compliance-kit/compliance-primitives/tree/main/tools/indexer",
+  "keywords": ["stellar", "soroban", "compliance", "indexer"],
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./dist/public.js",
+  "types": "./dist/public.d.ts",
+  "bin": {
+    "compliance-indexer": "./dist/index.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/public.d.ts",
+      "import": "./dist/public.js",
+      "default": "./dist/public.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "package.json"
+  ],
   "scripts": {
     "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src --ext .ts",
+    "prepublishOnly": "npm run typecheck && npm run lint && npm run build && npm test",
     "start": "node dist/index.js",
-    "dev": "tsx src/index.ts"
+    "dev": "tsx src/index.ts",
+    "test": "tsx --test src/decoder.test.ts"
   },
   "dependencies": {
     "sql.js": "^1.12.0"
   },
   "devDependencies": {
-    "@types/sql.js": "^1.4.9",
     "@types/node": "^20.14.0",
+    "@types/sql.js": "^1.4.9",
+    "eslint": "^9.35.0",
     "tsx": "^4.15.0",
-    "typescript": "^5.4.5"
+    "typescript": "^5.4.5",
+    "typescript-eslint": "^8.42.0"
   }
 }
