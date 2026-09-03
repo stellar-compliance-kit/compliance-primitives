@@ -1,0 +1,44 @@
+# Wasm binary size budgets, checked by `scripts/check-wasm-size.sh` (the
+# "wasm size budget" CI job in .github/workflows/ci.yml).
+#
+# Each entry is the released, stripped `wasm32v1-none` binary size in bytes
+# for one contract, measured with:
+#
+#   cargo build -p <crate> --target wasm32v1-none --release
+#   stat -c%s target/wasm32v1-none/release/<crate_with_underscores>.wasm
+#
+# `scripts/check-wasm-size.sh` allows a contract's binary to grow up to 10%
+# over its baseline before failing (same tolerance convention as the
+# per-function CPU/memory budgets in budget-baselines.toml). When a
+# deliberate size increase pushes a contract over budget, re-measure and
+# update its baseline here in the same PR, with a one-line note in the PR
+# description on why the growth is expected.
+#
+# Contracts that are pure Rust libraries with no `#[contract]` macro (no
+# wasm exports of their own — they're inlined into the contracts that
+# depend on them) are not deployable and have no binary of their own, so
+# they are intentionally not budgeted here:
+#   - pausable (compliance-pausable): shared pause/unpause helper, linked
+#     into allowlist-token, denylist-gate, jurisdiction-flag, and others.
+#
+# Contracts NOT yet covered below (tracked separately, not part of this
+# CI job's scope): `allowlist-token`, `audit-log`, `denylist-gate`,
+# `jurisdiction-flag`, and `policy-engine` currently fail to compile on
+# `main` for reasons unrelated to wasm size (missing imports, a duplicated
+# function definition, a mismatched delimiter, and a trait-impl mismatch,
+# respectively — see repo issue tracker). `scripts/check-wasm-size.sh`
+# skips any contract without a budget entry here rather than failing the
+# build on crates it can't measure; once each contract compiles again, add
+# its budget entry here so this job covers all nine contracts as intended.
+
+[circuit-breaker]
+wasm = "circuit_breaker.wasm"
+max_bytes = 3584
+
+[compliance-aggregator]
+wasm = "compliance_aggregator.wasm"
+max_bytes = 15274
+
+[multisig-admin]
+wasm = "multisig_admin.wasm"
+max_bytes = 6187

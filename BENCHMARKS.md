@@ -10,6 +10,7 @@ Compliance primitives add measurable but acceptable resource overhead to token t
 | Denylist-gate check | +250 | +100 bytes | ~250% to denylist cost |
 | Allowlist-token gate | +400 | +150 bytes | ~400% to allowlist cost |
 | Combined (denylist + allowlist) | +650 | +250 bytes | ~6.5x denylist cost |
+| Policy-engine evaluate (1 denylist check, All) | +350 | +130 bytes | ~3.5x denylist cost |
 
 **Key Finding**: The overhead is dominated by **cross-contract call overhead**, not by the compliance logic itself. Each cross-contract invocation costs ~100-150 CPU instructions, while each storage lookup costs ~10-20 instructions.
 
