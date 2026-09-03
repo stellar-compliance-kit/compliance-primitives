@@ -1,62 +1,13 @@
-//! Lightweight sequence fuzzer for `policy-engine` tree-build + evaluation
-//! invariants.
-//!
-//! ## Approach
-//!
-//! Full `cargo-fuzz` / libFuzzer targets are awkward for `#![no_std]` Soroban
-//! contracts (host `Env`, auth mocking, and no OS entropy inside the wasm
-//! build). Instead this harness is a seeded PRNG loop living in the crate's
-//! test binary — the same shape used by `jurisdiction-flag` (#87) — so the
-//! policy-engine gets the same random-sequence coverage without a separate
-//! fuzz workspace.
-//!
-//! The harness uses **inline mock contracts** (defined in `test_utils`) for
-//! the denylist and jurisdiction check dependencies so it is fully
-//! self-contained and models exactly the interfaces `policy-engine` calls
-//! via `DenylistCheckInterface` and `JurisdictionCheckInterface`.
-//!
-//! ## What is fuzzed
-//!
-//! Each iteration:
-//! 1. Creates a fresh `Env` with two inline mock contracts pre-deployed.
-//! 2. Runs a random sequence of `AddDenylist`, `AddJurisdiction`, and
-//!    `RemoveCheck` mutations, respecting `MAX_CHECKS`.
-//! 3. Randomly arms addresses on the mock denylist / assigns jurisdiction codes.
-//! 4. Calls `evaluate` for a random (from, to) pair and asserts no panic.
-//! 5. Verifies the result matches the oracle model.
-//!
-//! ## How to run
-//!
-//! Default short run (also covered by `cargo test -p policy-engine`):
-//!
-//! ```sh
-//! cargo test -p policy-engine fuzz_policy_engine_tree -- --nocapture
-//! ```
-//!
-//! Longer periodic campaign:
-//!
-//! ```sh
-//! FUZZ_ITERATIONS=2000 FUZZ_OPS=64 \
-//!   cargo test -p policy-engine fuzz_policy_engine_tree -- --nocapture
-//! ```
-//!
-//! Not wired into CI — keep the default iteration count small so
-//! `cargo test --workspace` stays fast; bump the env vars when hunting for
-//! regressions.
-
+//! Lightweight sequence fuzzer for `policy-engine` tree configuration and evaluation.
 extern crate std;
 
 use super::*;
-use crate::test_utils::{
-    MockDenylist, MockDenylistClient, MockJurisdiction, MockJurisdictionClient,
-};
-use soroban_sdk::testutils::{Address as _, EnvTestConfig};
-use soroban_sdk::{vec, Env, String};
+use denylist_gate::{DenylistGate, DenylistGateClient};
+use jurisdiction_flag::{JurisdictionFlag, JurisdictionFlagClient};
+use soroban_sdk::testutils::Address as _;
+use soroban_sdk::{vec, Env};
 
-// ---------------------------------------------------------------------------
-// xorshift32 PRNG — no extra RNG crate needed in tests
-// ---------------------------------------------------------------------------
-
+/// Tiny xorshift32 so we don't need an extra RNG crate in tests.
 fn next_u32(state: &mut u32) -> u32 {
     let mut x = *state;
     x ^= x << 13;
@@ -70,45 +21,8 @@ fn next_usize(state: &mut u32, upper: usize) -> usize {
     (next_u32(state) as usize) % upper
 }
 
-fn next_bool(state: &mut u32) -> bool {
-    next_u32(state) & 1 == 1
-}
-
-// ---------------------------------------------------------------------------
-// Operation type for random mutations
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy)]
-enum Op {
-    /// Append a denylist check to the policy.
-    AddDenylist,
-    /// Append a jurisdiction check to the policy.
-    AddJurisdiction,
-    /// Remove the check at a random index (no-op if the list is empty).
-    RemoveCheck,
-}
-
-const OPS: [Op; 3] = [Op::AddDenylist, Op::AddJurisdiction, Op::RemoveCheck];
-
-// ---------------------------------------------------------------------------
-// Fuzz test
-// ---------------------------------------------------------------------------
-
-/// Randomly builds policy-engine combinator trees and evaluates them,
-/// asserting no panic and result consistency with the oracle model.
-///
-/// Invariants checked after every random sequence:
-///
-/// 1. **No panic** — neither `add_check`, `remove_check`, nor `evaluate`
-///    should ever panic regardless of the input sequence.
-/// 2. **MaxDepthExceeded is returned** — `add_check` returns
-///    `Err(Error::MaxDepthExceeded)` when at capacity; it never panics.
-/// 3. **All semantics oracle** — with `CombineOp::All`, `evaluate` returns
-///    `true` iff every registered check passes for both `from` and `to`.
-/// 4. **Any semantics oracle** — with `CombineOp::Any`, `evaluate` returns
-///    `true` iff at least one registered check passes for both `from` and `to`.
 #[test]
-fn fuzz_policy_engine_tree() {
+fn fuzz_policy_engine_tree_and_evaluation() {
     let iterations: u32 = std::env::var("FUZZ_ITERATIONS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -116,200 +30,251 @@ fn fuzz_policy_engine_tree() {
     let ops_per_iter: u32 = std::env::var("FUZZ_OPS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(24);
+        .unwrap_or(32);
 
-    let juri_code_strs = ["US", "CA", "GB", "DE", "JP"];
-    // Fixed allowed-codes list used by every jurisdiction check in the engine
-    // so the oracle stays simple.
-    let allowed_strs = ["US", "CA", "GB"];
+    let permitted_codes = ["US", "CA"];
+    let all_codes = ["US", "CA", "DE", "JP", "FR"];
 
     for seed in 1..=iterations {
-        // Fresh environment for each iteration.  Disable snapshot-at-drop so
-        // the harness doesn't write 10k JSON files to disk during a long run.
-        let env = Env::new_with_config(EnvTestConfig {
-            capture_snapshot_at_drop: false,
-        });
+        let env = Env::default();
         env.mock_all_auths();
 
-        // Deploy inline mock contracts.
-        let deny_id = env.register(MockDenylist, ());
-        let juri_id = env.register(MockJurisdiction, ());
-
-        // Pick a random CombineOp for this iteration.
-        let mut rng: u32 = seed;
-        let use_all = next_bool(&mut rng);
-        let op_enum = if use_all { CombineOp::All } else { CombineOp::Any };
-
-        // Deploy policy engine.
         let admin = Address::generate(&env);
         let engine_id = env.register(PolicyEngine, ());
         let client = PolicyEngineClient::new(&env, &engine_id);
-        client.initialize(&admin, &op_enum);
 
-        // Small pool of addresses used for from/to and arming.
-        const POOL: usize = 4;
-        let addrs: [Address; POOL] = [
-            Address::generate(&env),
-            Address::generate(&env),
-            Address::generate(&env),
-            Address::generate(&env),
-        ];
+        let mut rng = seed;
 
-        // Build jurisdiction code values.
-        let codes: [String; 5] = [
-            String::from_str(&env, juri_code_strs[0]),
-            String::from_str(&env, juri_code_strs[1]),
-            String::from_str(&env, juri_code_strs[2]),
-            String::from_str(&env, juri_code_strs[3]),
-            String::from_str(&env, juri_code_strs[4]),
-        ];
-        let allowed_codes = vec![
-            &env,
-            String::from_str(&env, allowed_strs[0]),
-            String::from_str(&env, allowed_strs[1]),
-            String::from_str(&env, allowed_strs[2]),
-        ];
-
-        // ----------------------------------------------------------------
-        // Random mutation sequence — build the check list
-        // ----------------------------------------------------------------
-
-        // Oracle model: true = denylist check, false = jurisdiction check.
-        let mut check_is_deny: std::vec::Vec<bool> = std::vec::Vec::new();
-
-        for _ in 0..ops_per_iter {
-            let op = OPS[next_usize(&mut rng, OPS.len())];
-            match op {
-                Op::AddDenylist => {
-                    if check_is_deny.len() < MAX_CHECKS as usize {
-                        client.add_check(
-                            &admin,
-                            &CheckKind::Denylist(DenylistCheck {
-                                contract: deny_id.clone(),
-                            }),
-                        );
-                        check_is_deny.push(true);
-                    } else {
-                        // At capacity — must return MaxDepthExceeded, no panic.
-                        let res = client.try_add_check(
-                            &admin,
-                            &CheckKind::Denylist(DenylistCheck {
-                                contract: deny_id.clone(),
-                            }),
-                        );
-                        assert!(
-                            matches!(res, Err(Ok(Error::MaxDepthExceeded))),
-                            "seed={seed}: expected MaxDepthExceeded at capacity, got {res:?}"
-                        );
-                    }
-                }
-                Op::AddJurisdiction => {
-                    if check_is_deny.len() < MAX_CHECKS as usize {
-                        client.add_check(
-                            &admin,
-                            &CheckKind::Jurisdiction(JurisdictionCheck {
-                                contract: juri_id.clone(),
-                                allowed_codes: allowed_codes.clone(),
-                            }),
-                        );
-                        check_is_deny.push(false);
-                    } else {
-                        // At capacity — must return MaxDepthExceeded.
-                        let res = client.try_add_check(
-                            &admin,
-                            &CheckKind::Jurisdiction(JurisdictionCheck {
-                                contract: juri_id.clone(),
-                                allowed_codes: allowed_codes.clone(),
-                            }),
-                        );
-                        assert!(
-                            matches!(res, Err(Ok(Error::MaxDepthExceeded))),
-                            "seed={seed}: expected MaxDepthExceeded at capacity, got {res:?}"
-                        );
-                    }
-                }
-                Op::RemoveCheck => {
-                    if !check_is_deny.is_empty() {
-                        let idx = next_usize(&mut rng, check_is_deny.len());
-                        client.remove_check(&admin, &(idx as u32));
-                        check_is_deny.remove(idx);
-                    }
-                    // If the list is empty, skip — nothing to remove.
-                }
-            }
-        }
-
-        // ----------------------------------------------------------------
-        // Arm addresses randomly
-        // ----------------------------------------------------------------
-
-        // Randomly add some addresses to the mock denylist.
-        let mock_deny = MockDenylistClient::new(&env, &deny_id);
-        let mut denied: [bool; POOL] = [false; POOL];
-        for i in 0..POOL {
-            if next_bool(&mut rng) {
-                mock_deny.add_to_denylist(&addrs[i]);
-                denied[i] = true;
-            }
-        }
-
-        // Randomly assign jurisdiction codes to some addresses.
-        let mock_juri = MockJurisdictionClient::new(&env, &juri_id);
-        let mut juri_code: [Option<usize>; POOL] = [None; POOL];
-        for i in 0..POOL {
-            if next_bool(&mut rng) {
-                let ci = next_usize(&mut rng, codes.len());
-                mock_juri.set_jurisdiction(&addrs[i], &codes[ci]);
-                juri_code[i] = Some(ci);
-            }
-        }
-
-        // ----------------------------------------------------------------
-        // Evaluate and verify oracle
-        // ----------------------------------------------------------------
-
-        let addr_passes_denylist = |i: usize| -> bool { !denied[i] };
-        let addr_passes_jurisdiction = |i: usize| -> bool {
-            match juri_code[i] {
-                None => false,
-                Some(ci) => allowed_strs.contains(&juri_code_strs[ci]),
-            }
-        };
-
-        let check_passes = |is_deny: bool, i: usize| -> bool {
-            if is_deny {
-                addr_passes_denylist(i)
-            } else {
-                addr_passes_jurisdiction(i)
-            }
-        };
-
-        // Pick a random (from, to) pair.
-        let from_i = next_usize(&mut rng, POOL);
-        let to_i = next_usize(&mut rng, POOL);
-
-        // Oracle result.
-        let oracle_result = if check_is_deny.is_empty() {
-            // No checks: All → true (vacuously), Any → false.
-            use_all
-        } else if use_all {
-            check_is_deny.iter().all(|&is_deny| {
-                check_passes(is_deny, from_i) && check_passes(is_deny, to_i)
-            })
+        // 1. Determine CombineOp semantics randomly
+        let op = if next_u32(&mut rng) % 2 == 0 {
+            CombineOp::All
         } else {
-            check_is_deny.iter().any(|&is_deny| {
-                check_passes(is_deny, from_i) && check_passes(is_deny, to_i)
-            })
+            CombineOp::Any
         };
+        client.initialize(&admin, &op);
 
-        // evaluate must not panic.
-        let result = client.evaluate(&addrs[from_i], &addrs[to_i]);
+        // 2. Setup multiple denylist gates and jurisdiction flags
+        let num_gates = 2;
+        let mut gates = std::vec::Vec::new();
+        let gate_admin = Address::generate(&env);
+        for _ in 0..num_gates {
+            let id = env.register(DenylistGate, ());
+            DenylistGateClient::new(&env, &id).initialize(&gate_admin);
+            gates.push(id);
+        }
 
-        assert_eq!(
-            result, oracle_result,
-            "seed={seed} from={from_i} to={to_i} op={} checks={:?} denied={denied:?} juri={juri_code:?}",
-            if use_all { "All" } else { "Any" },
-            check_is_deny,
-        );
+        let num_flags = 2;
+        let mut flags = std::vec::Vec::new();
+        let flag_issuer = Address::generate(&env);
+        for _ in 0..num_flags {
+            let id = env.register(JurisdictionFlag, ());
+            JurisdictionFlagClient::new(&env, &id).initialize(&flag_issuer);
+            flags.push(id);
+        }
+
+        // 3. Pool of addresses
+        let num_addresses = 5;
+        let mut addresses = std::vec::Vec::new();
+        for _ in 0..num_addresses {
+            addresses.push(Address::generate(&env));
+        }
+
+        // Track states locally:
+        // - denylist_states[gate_index][addr_index] = is_denylisted
+        let mut denylist_states = std::vec![std::vec![false; num_addresses]; num_gates];
+        // - jurisdiction_states[flag_index][addr_index] = code_index
+        // We initialize all addresses to code 0 ("US") initially.
+        let mut jurisdiction_states = std::vec![std::vec![0; num_addresses]; num_flags];
+        for f_i in 0..num_flags {
+            for addr_i in 0..num_addresses {
+                let code_str = all_codes[0];
+                JurisdictionFlagClient::new(&env, &flags[f_i]).set_jurisdiction(
+                    &flag_issuer,
+                    &addresses[addr_i],
+                    &String::from_str(&env, code_str),
+                );
+            }
+        }
+
+        // Model representation of registered checks
+        let mut registered_checks = std::vec::Vec::new();
+
+        // 4. Random operations loop
+        for _ in 0..ops_per_iter {
+            let action = next_u32(&mut rng) % 5;
+            match action {
+                0 => {
+                    // Add check
+                    if next_u32(&mut rng) % 2 == 0 {
+                        let gate_idx = next_usize(&mut rng, num_gates);
+                        let check = CheckKind::Denylist {
+                            contract: gates[gate_idx].clone(),
+                        };
+                        client.add_check(&admin, &check);
+                        registered_checks.push(check);
+                    } else {
+                        let flag_idx = next_usize(&mut rng, num_flags);
+                        let allowed_codes_vec = vec![
+                            &env,
+                            String::from_str(&env, permitted_codes[0]),
+                            String::from_str(&env, permitted_codes[1]),
+                        ];
+                        let check = CheckKind::Jurisdiction {
+                            contract: flags[flag_idx].clone(),
+                            allowed_codes: allowed_codes_vec,
+                        };
+                        client.add_check(&admin, &check);
+                        registered_checks.push(check);
+                    }
+                }
+                1 => {
+                    // Remove check
+                    if !registered_checks.is_empty() {
+                        let idx = next_usize(&mut rng, registered_checks.len());
+                        client.remove_check(&admin, &(idx as u32));
+                        registered_checks.remove(idx);
+                    }
+                }
+                2 => {
+                    // Modify denylist state
+                    let gate_idx = next_usize(&mut rng, num_gates);
+                    let addr_idx = next_usize(&mut rng, num_addresses);
+                    let current = denylist_states[gate_idx][addr_idx];
+                    let gate_client = DenylistGateClient::new(&env, &gates[gate_idx]);
+                    if current {
+                        gate_client.remove_from_denylist(&gate_admin, &addresses[addr_idx]);
+                    } else {
+                        gate_client.add_to_denylist(&gate_admin, &addresses[addr_idx]);
+                    }
+                    denylist_states[gate_idx][addr_idx] = !current;
+                }
+                3 => {
+                    // Modify jurisdiction state
+                    let flag_idx = next_usize(&mut rng, num_flags);
+                    let addr_idx = next_usize(&mut rng, num_addresses);
+                    let new_code_idx = next_usize(&mut rng, all_codes.len());
+                    let code_str = all_codes[new_code_idx];
+                    let flag_client = JurisdictionFlagClient::new(&env, &flags[flag_idx]);
+                    flag_client.set_jurisdiction(
+                        &flag_issuer,
+                        &addresses[addr_idx],
+                        &String::from_str(&env, code_str),
+                    );
+                    jurisdiction_states[flag_idx][addr_idx] = new_code_idx;
+                }
+                4 => {
+                    // Evaluate random transfer pair
+                    let from_idx = next_usize(&mut rng, num_addresses);
+                    let to_idx = next_usize(&mut rng, num_addresses);
+
+                    let result = client.evaluate(&addresses[from_idx], &addresses[to_idx]);
+
+                    // Verify against model
+                    let expected = evaluate_model(
+                        &op,
+                        &registered_checks,
+                        from_idx,
+                        to_idx,
+                        &gates,
+                        &flags,
+                        &denylist_states,
+                        &jurisdiction_states,
+                        permitted_codes,
+                        all_codes,
+                    );
+                    assert_eq!(
+                        result, expected,
+                        "seed={seed}: mismatch on evaluate from={from_idx} to={to_idx}"
+                    );
+
+                    // Test batch evaluate
+                    let mut pairs = Vec::new(&env);
+                    pairs.push_back(AddressPair {
+                        from: addresses[from_idx].clone(),
+                        to: addresses[to_idx].clone(),
+                    });
+                    pairs.push_back(AddressPair {
+                        from: addresses[to_idx].clone(),
+                        to: addresses[from_idx].clone(),
+                    });
+
+                    let batch_results = client.batch_evaluate(&pairs);
+                    assert_eq!(batch_results.len(), 2);
+                    assert_eq!(batch_results.get(0).unwrap(), result);
+
+                    let expected_rev = evaluate_model(
+                        &op,
+                        &registered_checks,
+                        to_idx,
+                        from_idx,
+                        &gates,
+                        &flags,
+                        &denylist_states,
+                        &jurisdiction_states,
+                        permitted_codes,
+                        all_codes,
+                    );
+                    assert_eq!(batch_results.get(1).unwrap(), expected_rev);
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_model(
+    op: &CombineOp,
+    checks: &[CheckKind],
+    from_idx: usize,
+    to_idx: usize,
+    gates: &[Address],
+    flags: &[Address],
+    denylist_states: &[std::vec::Vec<bool>],
+    jurisdiction_states: &[std::vec::Vec<usize>],
+    permitted_codes: &[&str],
+    all_codes: &[&str],
+) -> bool {
+    let run_check_model = |check: &CheckKind, addr_idx: usize| -> bool {
+        match check {
+            CheckKind::Denylist { contract } => {
+                let gate_idx = gates.iter().position(|id| id == contract).unwrap();
+                let is_denylisted = denylist_states[gate_idx][addr_idx];
+                !is_denylisted
+            }
+            CheckKind::Jurisdiction { contract, .. } => {
+                let flag_idx = flags.iter().position(|id| id == contract).unwrap();
+                let code_idx = jurisdiction_states[flag_idx][addr_idx];
+                let code_str = all_codes[code_idx];
+                permitted_codes.contains(&code_str)
+            }
+        }
+    };
+
+    match op {
+        CombineOp::All => {
+            let mut all_pass = true;
+            for check in checks {
+                if !run_check_model(check, from_idx) || !run_check_model(check, to_idx) {
+                    all_pass = false;
+                    break;
+                }
+            }
+            all_pass
+        }
+        CombineOp::Any => {
+            if checks.is_empty() {
+                false
+            } else {
+                let mut any_pass = false;
+                for check in checks {
+                    if run_check_model(check, from_idx) && run_check_model(check, to_idx) {
+                        any_pass = true;
+                        break;
+                    }
+                }
+                any_pass
+            }
+        }
     }
 }

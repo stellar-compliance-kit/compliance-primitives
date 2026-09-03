@@ -138,18 +138,13 @@ pub enum CombineOp {
     Any,
 }
 
-/// The full configured policy tree returned by [`PolicyEngine::get_policy`].
-///
-/// Bundles the combination operator together with the ordered list of checks
-/// so that off-chain tooling and auditors can inspect everything about the
-/// current policy in a single call.
+/// Describes a pair of addresses (e.g. sender and recipient) for evaluating
+/// compliance policies on transfers in batches.
 #[contracttype]
-#[derive(Clone)]
-pub struct PolicyNode {
-    /// How the results of `checks` are combined during evaluation.
-    pub op: CombineOp,
-    /// Ordered list of compliance checks the engine runs on every transfer.
-    pub checks: Vec<CheckKind>,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AddressPair {
+    pub from: Address,
+    pub to: Address,
 }
 
 #[contracttype]
@@ -407,97 +402,16 @@ impl PolicyEngine {
         Ok(passed)
     }
 
-    /// Evaluate the configured policy for each address in `addresses`
-    /// individually and return a `Vec<bool>` of results in the same order.
+    /// Evaluate the current policy for multiple address pairs (transfers) in a single call.
     ///
-    /// Each address is run through every registered check on its own — this
-    /// is a per-address (not per-transfer) evaluation. Use `evaluate` when
-    /// you need to gate a specific `from → to` transfer; use `batch_evaluate`
-    /// when you want to screen a list of addresses in a single call (e.g.
-    /// pre-screening a participant registry).
-    ///
-    /// Returns `Err(Error::BatchTooLarge)` if `addresses.len() >
-    /// MAX_BATCH_SIZE` to prevent budget exhaustion. Returns
-    /// `Err(Error::NotInitialized)` if the contract has not been set up yet.
-    ///
-    /// No `PolicyResult` event is emitted per-address to keep the batch
-    /// cost predictable; callers that need an audit trail should call
-    /// `evaluate` individually for the addresses they intend to act on.
-    pub fn batch_evaluate(env: Env, addresses: Vec<Address>) -> Result<Vec<bool>, Error> {
-        if addresses.len() > MAX_BATCH_SIZE {
-            return Err(Error::BatchTooLarge);
+    /// Returns a `Vec<bool>` containing the pass/fail status for each pair in the same order.
+    pub fn batch_evaluate(env: Env, pairs: Vec<AddressPair>) -> Result<Vec<bool>, Error> {
+        let mut results = Vec::new(&env);
+        for pair in pairs.iter() {
+            let res = Self::evaluate(env.clone(), pair.from, pair.to)?;
+            results.push_back(res);
         }
-
-        let checks: Vec<CheckKind> = env
-            .storage()
-            .instance()
-            .get(&DataKey::Checks)
-            .ok_or(Error::NotInitialized)?;
-        let op: CombineOp = env
-            .storage()
-            .instance()
-            .get(&DataKey::CombineOp)
-            .ok_or(Error::NotInitialized)?;
-
-        let mut results: Vec<bool> = Vec::new(&env);
-
-        for address in addresses.iter() {
-            let passed = match op {
-                CombineOp::All => {
-                    let mut all_pass = true;
-                    for i in 0..checks.len() {
-                        let check = checks.get(i).unwrap();
-                        if !Self::run_check(&env, &check, &address) {
-                            all_pass = false;
-                            break;
-                        }
-                    }
-                    all_pass
-                }
-                CombineOp::Any => {
-                    if checks.is_empty() {
-                        false
-                    } else {
-                        let mut any_pass = false;
-                        for i in 0..checks.len() {
-                            let check = checks.get(i).unwrap();
-                            if Self::run_check(&env, &check, &address) {
-                                any_pass = true;
-                                break;
-                            }
-                        }
-                        any_pass
-                    }
-                }
-            };
-            results.push_back(passed);
-        }
-
         Ok(results)
-    }
-
-    // -----------------------------------------------------------------------
-    // Upgradeability
-    // -----------------------------------------------------------------------
-
-    /// Upgrade the contract to a new WASM implementation. Admin-only.
-    ///
-    /// Calls `update_current_contract_wasm` to swap the running contract
-    /// code. All persistent and instance storage (admin, checks, combine
-    /// op) is preserved across the upgrade since the storage ledger entries
-    /// are untouched by a WASM hash swap. An `UpgradePerformed` event is
-    /// emitted for auditability.
-    ///
-    /// # Security model
-    /// - Only the initialized admin can trigger an upgrade
-    /// - Existing check list, combine op, and admin key survive the upgrade
-    /// - Callers must migrate storage layout changes themselves in the new
-    ///   WASM's `initialize`/migration logic if the storage shape changes
-    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
-        Self::require_admin(&env, &admin)?;
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
-        UpgradePerformed { admin }.publish(&env);
-        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -585,4 +499,5 @@ mod test_utils;
 mod test;
 
 #[cfg(test)]
-mod integration_test;
+mod fuzz;
+
