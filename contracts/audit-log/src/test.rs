@@ -1,6 +1,8 @@
+extern crate std;
+
 use super::*;
 use soroban_sdk::testutils::{Address as _, Events as _};
-use soroban_sdk::{vec, Env, Symbol};
+use soroban_sdk::{vec, Env, String, Symbol};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -203,4 +205,208 @@ fn test_double_initialize_fails() {
     let (admin, _contract_id, client) = setup(&env);
     let result = client.try_initialize(&admin);
     assert_eq!(result, Err(Ok(Error::AlreadyInitialized)));
+}
+
+/// Lightweight sequence fuzzer for audit-log entry sequences.
+///
+/// Feeds randomized sequences of log calls with varying source addresses and
+/// payload sizes and asserts the contract never panics and storage stays
+/// internally consistent.
+fn next_u32(state: &mut u32) -> u32 {
+    let mut x = *state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *state = if x == 0 { 0x9E37_79B9 } else { x };
+    *state
+}
+
+fn next_usize(state: &mut u32, upper: usize) -> usize {
+    (next_u32(state) as usize) % upper
+}
+
+#[test]
+fn fuzz_audit_log_entry_sequences() {
+    let iterations: u32 = std::env::var("FUZZ_ITERATIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(128);
+    let ops_per_iter: u32 = std::env::var("FUZZ_OPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(24);
+
+    let kind_strs = ["deny_add", "deny_remove", "jurisdiction_set", "flag_clear"];
+    let detail_strs = ["added", "removed", "updated", "cleared", "modified"];
+
+    for seed in 1..=iterations {
+        let env = Env::default();
+        let (_admin, _contract_id, client) = setup(&env);
+
+        let sources: [Address; 4] = [
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+        ];
+
+        let subjects: [Address; 4] = [
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+        ];
+
+        let mut model_count: u64 = 0;
+        let mut rng = seed;
+
+        for _ in 0..ops_per_iter {
+            let source_i = next_usize(&mut rng, sources.len());
+            let subject_i = next_usize(&mut rng, subjects.len());
+            let kind_i = next_usize(&mut rng, kind_strs.len());
+            let detail_i = next_usize(&mut rng, detail_strs.len());
+
+            let source = &sources[source_i];
+            let subject = &subjects[subject_i];
+            let kind = Symbol::new(&env, kind_strs[kind_i]);
+            let detail = String::from_str(&env, detail_strs[detail_i]);
+
+            let result = client.try_record(source, &kind, subject, &detail);
+            if result.is_ok() {
+                model_count += 1;
+            }
+        }
+
+        let final_count = client.entry_count();
+        assert_eq!(
+            final_count, model_count,
+            "seed={seed}: entry count mismatch (expected {}, got {})",
+            model_count, final_count
+        );
+
+        for i in 0..final_count {
+            let entry = client.get_entry(&i);
+            assert!(
+                entry.is_some(),
+                "seed={seed}: entry at index {i} should exist (count = {final_count})"
+            );
+        }
+
+        let beyond_count = client.get_entry(&(final_count + 100));
+        assert!(
+            beyond_count.is_none(),
+            "seed={seed}: entry far beyond count should not exist"
+        );
+    }
+}
+
+#[test]
+fn test_is_paused_defaults_to_false() {
+    let env = Env::default();
+    let (_admin, _contract_id, client) = setup(&env);
+    assert!(!client.is_paused());
+}
+
+#[test]
+fn test_pause_and_unpause() {
+    let env = Env::default();
+    let (admin, _contract_id, client) = setup(&env);
+
+    client.pause(&admin);
+    assert!(client.is_paused());
+
+    client.unpause(&admin);
+    assert!(!client.is_paused());
+}
+
+#[test]
+fn test_record_rejected_while_paused() {
+    let env = Env::default();
+    let (admin, _contract_id, client) = setup(&env);
+
+    let source = Address::generate(&env);
+    let subject = Address::generate(&env);
+    let kind = Symbol::new(&env, "deny_add");
+    let detail = soroban_sdk::String::from_str(&env, "test");
+
+    client.pause(&admin);
+
+    let result = client.try_record(&source, &kind, &subject, &detail);
+    assert_eq!(result, Err(Ok(Error::ContractPaused)));
+}
+
+#[test]
+fn test_record_succeeds_after_unpause() {
+    let env = Env::default();
+    let (admin, _contract_id, client) = setup(&env);
+
+    let source = Address::generate(&env);
+    let subject = Address::generate(&env);
+    let kind = Symbol::new(&env, "deny_add");
+    let detail = soroban_sdk::String::from_str(&env, "test");
+
+    client.pause(&admin);
+    client.unpause(&admin);
+
+    client.record(&source, &kind, &subject, &detail);
+    let entry = client.get_entry(&0u64).expect("entry must exist");
+    assert_eq!(entry.source, source);
+}
+
+#[test]
+fn test_read_methods_succeed_while_paused() {
+    let env = Env::default();
+    let (admin, _contract_id, client) = setup(&env);
+
+    let source = Address::generate(&env);
+    let subject = Address::generate(&env);
+    let kind = Symbol::new(&env, "deny_add");
+    let detail = soroban_sdk::String::from_str(&env, "test");
+
+    client.record(&source, &kind, &subject, &detail);
+    client.pause(&admin);
+
+    assert_eq!(client.entry_count(), 1u64);
+    assert!(client.get_entry(&0u64).is_some());
+}
+
+#[test]
+fn test_pause_emits_event() {
+    let env = Env::default();
+    let (admin, contract_id, client) = setup(&env);
+
+    client.pause(&admin);
+
+    let events = env.events().all();
+    // Should have the ComplianceEvent from initialize and the Paused event
+    // Just verify the Paused event is present
+    assert!(events.iter().any(|(_, _, e)| {
+        e.to_string().contains("Paused")
+    }));
+}
+
+#[test]
+fn test_unpause_emits_event() {
+    let env = Env::default();
+    let (admin, contract_id, client) = setup(&env);
+
+    client.pause(&admin);
+    env.events().clear();
+    client.unpause(&admin);
+
+    let events = env.events().all();
+    assert!(!events.is_empty());
+    assert!(events.iter().any(|(_, _, e)| {
+        e.to_string().contains("Unpaused")
+    }));
+}
+
+#[test]
+fn test_non_admin_cannot_pause() {
+    let env = Env::default();
+    let (admin, _contract_id, client) = setup(&env);
+
+    let non_admin = Address::generate(&env);
+    let result = client.try_pause(&non_admin);
+    assert_eq!(result, Err(Ok(Error::NotAuthorized)));
 }

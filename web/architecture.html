@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Architecture — compliance-primitives</title><meta name="description" content="Composition graph for the nine compliance-primitives contracts"><link rel="icon" href="favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="styles.css"></head><body><nav><div class="wrap"><a class="brand" href="index.html">compliance-primitives</a><div class="nav-links"><a href="index.html#contracts">Contracts</a><a href="architecture.html">Architecture</a><a href="changelog.html">Changelog</a><a href="index.html">Home</a></div></div></nav><main class="page wrap"><span class="badge">System design</span><h1>Contract architecture</h1><p class="lede">Nine focused Soroban contracts composed through explicit checks and administrative controls.</p><div class="diagram"><img src="architecture.svg" alt="Diagram showing the composition relationships between nine compliance contracts"></div><article class="markdown"><h2>Source architecture</h2><pre># Architecture
+
+The compliance primitives are nine independently deployable Soroban contracts that compose through explicit calls. The `allowlist-token` wrapper delegates cleared transfers to an underlying SEP-41 token. The `compliance-aggregator` combines checks from the `denylist-gate`, `jurisdiction-flag`, and `policy-engine`. A token or RWA wrapper can call the aggregator before transfers. `pausable` and `circuit-breaker` can stop operations during emergencies. `audit-log` records compliance decisions, while `multisig-admin` protects administrative actions.
+
+```text
+allowlist-token -&gt; compliance-aggregator
+compliance-aggregator -&gt; denylist-gate
+compliance-aggregator -&gt; jurisdiction-flag
+compliance-aggregator -&gt; policy-engine
+compliance-aggregator -&gt; audit-log
+multisig-admin -&gt; allowlist-token
+multisig-admin -&gt; denylist-gate
+multisig-admin -&gt; jurisdiction-flag
+multisig-admin -&gt; policy-engine
+pausable -&gt; allowlist-token
+circuit-breaker -&gt; compliance-aggregator
+```
+
+The graph is intentionally modular: applications choose the controls they need and call them before permitting a transfer or administrative operation.
+</pre></article></main><footer><div class="wrap"><div class="foot-row"><span>MIT License · Stellar compliance primitives</span><a href="https://github.com/stellar-compliance-kit/compliance-primitives">GitHub</a></div></div></footer></body></html>

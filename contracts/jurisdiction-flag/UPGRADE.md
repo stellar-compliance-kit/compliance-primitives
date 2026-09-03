@@ -27,6 +27,8 @@ The upgrade mechanism relies on **storage layout stability**:
 
 If a new version needs to migrate the storage schema (e.g., changing the `DataKey` enum), a migration function must be called after the upgrade. This is a manual step, not automatic.
 
+See [`STORAGE_VERSIONING.md`](../../STORAGE_VERSIONING.md) at the repo root for the project-wide policy on what counts as a breaking storage-layout change and what migration support is required before shipping one.
+
 ## Security Model
 
 ### Who Can Upgrade?
