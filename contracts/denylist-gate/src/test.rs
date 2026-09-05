@@ -126,15 +126,50 @@ fn test_add_to_denylist_rejects_non_admin() {
     assert!(client.check(&alice));
 }
 
+/// Soroban's `Address` type has no literal "empty" or "invalid" value the
+/// way a raw string would (e.g. `""` or `0x0`). Every `Address` is a
+/// cryptographically valid key, so the only way to test the "never touched"
+/// default is to generate a fresh one and immediately call `check`.
+///
+/// This test guards the `unwrap_or(false)` fallback in `check`: if the
+/// storage entry is missing, the address must read as "clear" (`true`),
+/// not panic or default to denied.
 #[test]
 fn test_empty_address_key_is_well_defined() {
-    // An address that has never been touched must read as "clear" (true),
-    // not panic or default to denied. This guards the `unwrap_or(false)`
-    // fallback in `check`.
     let env = Env::default();
     let (_admin, _contract_id, client) = setup(&env);
     let never_seen = Address::generate(&env);
     assert!(client.check(&never_seen));
+}
+
+/// A freshly generated address that has never been referenced by the contract
+/// (not added, not removed, not checked before) must return `true` from
+/// `check()`. This is the baseline "clear" state.
+#[test]
+fn test_fresh_address_never_referenced_returns_clear() {
+    let env = Env::default();
+    let (_admin, _contract_id, client) = setup(&env);
+    let fresh = Address::generate(&env);
+    assert!(client.check(&fresh));
+}
+
+/// Adding an address to the denylist and then removing it must restore the
+/// default "clear" state. `check()` should return `true`, not leave stale
+/// storage that might read as `false`.
+#[test]
+fn test_add_remove_roundtrip_restores_default_clear() {
+    let env = Env::default();
+    let (admin, _contract_id, client) = setup(&env);
+    let target = Address::generate(&env);
+
+    // Pre-condition: target is clear before any mutation.
+    assert!(client.check(&target));
+
+    client.add_to_denylist(&admin, &target);
+    assert!(!client.check(&target));
+
+    client.remove_from_denylist(&admin, &target);
+    assert!(client.check(&target));
 }
 
 #[test]
