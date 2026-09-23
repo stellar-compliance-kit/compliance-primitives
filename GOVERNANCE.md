@@ -152,6 +152,49 @@ All PRs are reviewed against:
 
 `complexity: medium` and `complexity: high` PRs may be reviewed more thoroughly and may require multiple rounds of feedback.
 
+## Merging conflicting contract PRs
+
+Several feature PRs in this repo have touched the same contract file — pause,
+compliance-officer, audit-log, TTL extension, and multisig signer work have all
+landed in one `lib.rs` at different times. When two of them are merged without
+being reconciled, the result still *compiles*: `cargo check` is happy with a
+file that ends up with a function body defined twice, or with an orphaned block
+kept from one side of the conflict. The damage only shows up later, as a
+confusing error in an unrelated PR or a wasm export collision at link time.
+
+When you resolve a conflict in a shared contract file, work through this list
+before you push the merge commit:
+
+- [ ] **Resolve the hunk, not the file.** Never take `--ours` or `--theirs`
+      wholesale for a conflict in a contract `lib.rs` — in these merges both
+      sides are usually wanted, just once each.
+- [ ] **Read the merged file, not the diff.** For every function either branch
+      touched (including ones the other branch added nearby), confirm it is
+      defined exactly once and that no helper the merged code calls was dropped
+      with the other side of the conflict.
+- [ ] **Run `cargo test -p <affected-crate>` — not just `cargo check`.** This is
+      the step this section exists for. `check` proves the file type-checks;
+      only the test build compiles the merged set of `#[contractimpl]` exports
+      and fails on a duplicated entrypoint or a stale call left behind.
+- [ ] **If the conflict was in an interface**, run `./scripts/regenerate-docs.sh`
+      and commit the regenerated `docs/interfaces/` — a merge can leave the
+      extracted XDR spec describing the pre-merge signature.
+- [ ] **If the shared file involves storage keys** (`DataKey` or any other
+      `#[contracttype]` used for storage), re-read
+      [`STORAGE_VERSIONING.md`](./STORAGE_VERSIONING.md) after the merge: a
+      conflict can silently drop a variant one branch added.
+- [ ] **Run `make test` and `make lint` across the workspace** before merging,
+      not only the crate in conflict — a fix in one crate can mask a break in a
+      sibling that was merged alongside it.
+- [ ] **Make the merge commit message describe the reconciliation**: name both
+      PRs and say which hunks you kept or dropped, so the next person reading
+      `git log` on that file knows what was intentional.
+
+The same rules apply when a *contributor* rebases onto `main` after a sibling
+PR merged into the same contract file: a clean rebase is not the same as a
+correct one. Run the crate's tests after the rebase, not only after the
+original commit.
+
 ## Questions?
 
 If you're unsure about complexity, scope, or whether an issue is a good fit, open an issue with your question or comment on the relevant existing issue. The maintainers are here to help.
