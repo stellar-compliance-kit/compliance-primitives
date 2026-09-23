@@ -45,13 +45,25 @@ deployment and walkthrough.
 
 Each example under `/examples` demonstrates a different composition pattern:
 
-- **[circuit-breaker-policy-engine](./examples/circuit-breaker-policy-engine)** — wires `circuit-breaker` as a pre-check before `policy-engine` evaluation
-- **[denylist-gate-consumer](./examples/denylist-gate-consumer)** — minimal token calling `denylist-gate` and `circuit-breaker` before transfers
-- **[denylist-gate-sep41](./examples/denylist-gate-sep41)** — `denylist-gate` integration for SEP-41 anchor compliance
-- **[jurisdiction-flag-consumer](./examples/jurisdiction-flag-consumer)** — token enforcing jurisdiction-based transfer restrictions
-- **[jurisdiction-denylist-consumer](./examples/jurisdiction-denylist-consumer)** — combines `jurisdiction-flag` and `denylist-gate` checks
-- **[rwa-compliance-flow](./examples/rwa-compliance-flow)** — full RWA compliance stack with allowlist, denylist, and jurisdiction checks
-- **[rwa-token](./examples/rwa-token)** — reference RWA token composing all three primitives (testnet deployment available)
+| Example | Primitives | Pattern |
+|---------|-----------|---------|
+| [allowlist-token-usage](./examples/allowlist-token-usage) | `allowlist-token` | CLI walkthrough: deploy, allowlist, then a blocked and a successful transfer |
+| [circuit-breaker-policy-engine](./examples/circuit-breaker-policy-engine) | `circuit-breaker`, `policy-engine` | Circuit breaker as a pre-check before policy-engine evaluation |
+| [compliance-integration-flow](./examples/compliance-integration-flow) | `jurisdiction-flag`, `policy-engine`, `compliance-aggregator`, `multisig-admin`, `circuit-breaker`, `audit-log` | A single transfer flow across seven contracts, multisig-administered and audited |
+| [denylist-gate-consumer](./examples/denylist-gate-consumer) | `denylist-gate`, `circuit-breaker` | Minimal token calling the gate and the breaker before transfers |
+| [denylist-gate-sep41](./examples/denylist-gate-sep41) | `denylist-gate` | `denylist-gate` integration for SEP-41 anchor compliance |
+| [jurisdiction-denylist-consumer](./examples/jurisdiction-denylist-consumer) | `jurisdiction-flag`, `denylist-gate` | Ordered AND composition: gate check for both parties, then the sender's jurisdiction |
+| [jurisdiction-flag-consumer](./examples/jurisdiction-flag-consumer) | `jurisdiction-flag` | Token enforcing jurisdiction-based transfer restrictions |
+| [multisig-aggregator](./examples/multisig-aggregator) | `multisig-admin`, `compliance-aggregator` | M-of-N multisig as the aggregator's admin, gating its config changes |
+| [multisig-audit-trail](./examples/multisig-audit-trail) | `multisig-admin`, `audit-log` | Propose → approve → execute, with the whole trail recorded in the audit log |
+| [pausable-consumer](./examples/pausable-consumer) | `pausable` | The five wiring steps for adopting the shared pause crate |
+| [policy-engine-audit](./examples/policy-engine-audit) | `policy-engine`, `audit-log` | Every policy evaluation recorded in the audit log, pass or fail |
+| [rwa-compliance-flow](./examples/rwa-compliance-flow) | `allowlist-token`, `denylist-gate`, `jurisdiction-flag` | Full RWA compliance stack with allowlist, denylist, and jurisdiction checks |
+| [rwa-token](./examples/rwa-token) | `allowlist-token`, `denylist-gate`, `jurisdiction-flag` | Reference RWA token composing all three primitives (testnet deployment available) |
+
+[`examples/README.md`](./examples/README.md) carries the same mapping with the
+composition details, the crate each primitive lives in, and how to run a single
+example.
 
 ## Quick start
 
