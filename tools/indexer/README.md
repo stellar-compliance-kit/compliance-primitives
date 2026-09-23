@@ -142,34 +142,62 @@ The repository’s `prepublishOnly` hook runs typechecking, lint, build, and tes
 
 ## Database schema
 
-The indexer writes to four tables.
+`src/db.ts` is the source of truth: it creates the schema in `migrate()` and
+keeps the materialised tables up to date in `updateState()`. Every table,
+column, index and migration below is taken from those two functions, so you can
+build a dashboard or a reporting query against `compliance.db` without reading
+the TypeScript first — see
+[Keeping this section in sync](#keeping-this-section-in-sync) for the rule that
+keeps it that way.
+
+The indexer writes to **seven** tables, in three groups:
+
+| Group | Tables | Purpose |
+|-------|--------|---------|
+| Raw log | `events` | Every observed event, in ledger order |
+| Materialised state | `allowlist`, `denylist`, `jurisdictions`, `audit_log` | Current/append-only views derived from `events` |
+| Bookkeeping | `indexer_state`, `schema_migrations` | Resume point and applied migrations |
 
 ### `events` — raw audit log
 
-Every compliance event that has ever been observed, in ledger order.
+Every compliance event that has ever been observed, in ledger order. This is the
+only table that holds the undecoded event payloads (`raw_topics`, `raw_data`).
 
 | Column | Type | Description |
 |--------|------|-------------|
 | `id` | `INTEGER` PK | Auto-increment |
-| `ledger_sequence` | `INTEGER` | Ledger the event landed in |
-| `timestamp` | `INTEGER` | Unix seconds (from ledger close time) |
-| `contract_id` | `TEXT` | Emitting contract |
-| `event_type` | `TEXT` | `AllowAdd` \| `AllowRemove` \| `Blocked` \| `DenyAdd` \| `DenyRemove` \| `JurisdictionSet` |
-| `address` | `TEXT` | Primary subject address |
+| `ledger_sequence` | `INTEGER` NOT NULL | Ledger the event landed in |
+| `timestamp` | `INTEGER` | Unix seconds (from ledger close time); `NULL` if the RPC node didn't return a close time |
+| `contract_id` | `TEXT` NOT NULL | Emitting contract |
+| `event_type` | `TEXT` NOT NULL | `AllowAdd` \| `AllowRemove` \| `Blocked` \| `DenyAdd` \| `DenyRemove` \| `JurisdictionSet` \| `ComplianceEvent` |
+| `address` | `TEXT` | Primary subject address (for `ComplianceEvent` this is the audit-log *subject*) |
 | `address_to` | `TEXT` | Secondary address (`Blocked` only) |
 | `amount` | `TEXT` | Transfer amount as decimal string (`Blocked` only) |
 | `jurisdiction` | `TEXT` | ISO jurisdiction code (`JurisdictionSet` only) |
-| `raw_topics` | `TEXT` | JSON array of base64-XDR topic values |
-| `raw_data` | `TEXT` | Base64-XDR data value |
+| `kind` | `TEXT` | Audit-log event kind symbol (`ComplianceEvent` only, e.g. `deny_add`) |
+| `source` | `TEXT` | Address that called `record()` on audit-log (`ComplianceEvent` only) |
+| `detail` | `TEXT` | Free-form audit-log detail string (`ComplianceEvent` only) |
+| `raw_topics` | `TEXT` NOT NULL | JSON array of base64-XDR topic values |
+| `raw_data` | `TEXT` NOT NULL | Base64-XDR data value |
+| `source_tx_hash` | `TEXT` | Added in migration v2; source transaction hash when known |
+
+Indexes: `idx_events_contract (contract_id)`, `idx_events_address (address)`,
+`idx_events_type (event_type)`, `idx_events_ledger (ledger_sequence)`.
+
+`event_type` decides which materialised table an event also writes to — see each
+table below.
 
 ### `allowlist` — current membership
 
+`AllowAdd` inserts (`INSERT OR IGNORE`), `AllowRemove` deletes. One row per
+allowlisted address per contract.
+
 | Column | Type | Description |
 |--------|------|-------------|
-| `contract_id` | `TEXT` | Which allowlist-token contract |
-| `address` | `TEXT` | Address currently on the allowlist |
+| `contract_id` | `TEXT` NOT NULL | Which allowlist-token contract |
+| `address` | `TEXT` NOT NULL | Address currently on the allowlist |
 
-`AllowAdd` inserts; `AllowRemove` deletes. Query the full current set with:
+Primary key `(contract_id, address)`. Query the full current set with:
 
 ```sql
 SELECT address FROM allowlist WHERE contract_id = '<your-contract-id>';
@@ -177,7 +205,15 @@ SELECT address FROM allowlist WHERE contract_id = '<your-contract-id>';
 
 ### `denylist` — current membership
 
-Same structure as `allowlist`.
+Same structure and same add/remove semantics as `allowlist` (`DenyAdd` /
+`DenyRemove`).
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `contract_id` | `TEXT` NOT NULL | Which denylist-gate contract |
+| `address` | `TEXT` NOT NULL | Address currently on the denylist |
+
+Primary key `(contract_id, address)`.
 
 ```sql
 SELECT address FROM denylist WHERE contract_id = '<your-contract-id>';
@@ -185,13 +221,16 @@ SELECT address FROM denylist WHERE contract_id = '<your-contract-id>';
 
 ### `jurisdictions` — current assignments
 
-| Column | Type |
-|--------|------|
-| `contract_id` | `TEXT` |
-| `address` | `TEXT` |
-| `code` | `TEXT` |
+One row per address per contract; the last `JurisdictionSet` wins (upsert on
+`ON CONFLICT (contract_id, address)`).
 
-Last `JurisdictionSet` wins (upsert). Query with:
+| Column | Type | Description |
+|--------|------|-------------|
+| `contract_id` | `TEXT` NOT NULL | Which jurisdiction-flag contract |
+| `address` | `TEXT` NOT NULL | Address the code applies to |
+| `code` | `TEXT` NOT NULL | ISO jurisdiction code (e.g. `US`) |
+
+Primary key `(contract_id, address)`. Query with:
 
 ```sql
 SELECT address, code FROM jurisdictions WHERE contract_id = '<your-contract-id>';
@@ -199,18 +238,92 @@ SELECT address, code FROM jurisdictions WHERE contract_id = '<your-contract-id>'
 SELECT address FROM jurisdictions WHERE contract_id = '...' AND code = 'US';
 ```
 
-### `schema_migrations` — migration history
+### `audit_log` — append-only decisions
 
-The indexer records each applied schema version in this table. Migrations are additive and run at startup, so upgrading the indexer preserves existing events and materialized state.
+Written for `ComplianceEvent` events, so a dashboard can read the audit trail
+without decoding `events.raw_data`. Unlike the three tables above this one is
+append-only: nothing updates or deletes rows here, and a `ComplianceEvent` does
+**not** also change `allowlist`/`denylist`/`jurisdictions` (that only happens
+for the `Allow*`/`Deny*`/`JurisdictionSet` event types).
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | `INTEGER` PK | Auto-increment |
+| `contract_id` | `TEXT` NOT NULL | Which audit-log contract emitted it |
+| `ledger` | `INTEGER` NOT NULL | Ledger the entry landed in |
+| `timestamp` | `INTEGER` | Unix seconds (from ledger close time) |
+| `kind` | `TEXT` NOT NULL | Event kind symbol (e.g. `deny_add`, `proposal_approved`) |
+| `subject` | `TEXT` NOT NULL | Address the entry is about (from the event's `address`) |
+| `source` | `TEXT` NOT NULL | Address that called `record()` |
+| `detail` | `TEXT` NOT NULL | Free-form detail string; empty string when the event carries none |
+
+Indexes: `idx_audit_log_contract (contract_id)`,
+`idx_audit_log_subject (subject)`, `idx_audit_log_kind (kind)`.
+
+```sql
+SELECT ledger, timestamp, kind, subject, source, detail
+FROM audit_log
+WHERE contract_id = 'C...'
+ORDER BY ledger;
+```
 
 ### `indexer_state` — internal key/value store
 
 | Column | Type | Description |
 |--------|------|-------------|
 | `key` | `TEXT` PK | Key name |
-| `value` | `TEXT` | Value for the key |
+| `value` | `TEXT` NOT NULL | Value for the key |
 
-Currently stores one row: `key = 'last_ledger'`, `value = <ledger sequence>`. On startup the indexer reads this row to resume from where it left off rather than re-scanning from the beginning.
+Currently stores one row: `key = 'last_ledger'`, `value = <ledger sequence>`. On
+startup the indexer reads this row to resume from where it left off rather than
+re-scanning from the beginning.
+
+### `schema_migrations` — migration history
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `version` | `INTEGER` PK | Applied schema version |
+| `applied_at` | `TEXT` NOT NULL | ISO-8601 timestamp of when it was applied |
+
+The indexer records each applied schema version here. Migrations are additive
+and run at startup (`v1` creates the tables above, `v2` adds
+`events.source_tx_hash`), so upgrading the indexer preserves existing events and
+materialised state.
+
+### Keeping this section in sync
+
+This reference is maintained alongside `src/db.ts` — it is described from the
+same file that creates the schema, and it is updated in the same PR as any
+schema change. If you add, rename, or drop a column or table in
+`migrate()`/`updateState()`:
+
+1. Add the matching row to the relevant table above.
+2. If the change is a new column on an existing database, add a migration block
+   (`schema_migrations` version + `ALTER TABLE`) — the tables are created with
+   `CREATE TABLE IF NOT EXISTS`, so an existing `compliance.db` only picks up
+   changes through a migration.
+3. Add or update a focused test in `src/db.test.ts` that asserts the new column
+   or table, so the drift is caught in CI rather than in someone's dashboard.
+
+#### Known drift (as of the current `src/db.ts`)
+
+Two mismatches between `src/db.ts` and what it can actually create are worth
+knowing about before you query the database:
+
+- The file declares three indexes on columns the `events` table never gets —
+  `idx_events_signer (signer_address)`,
+  `idx_events_policy_from (policy_from)`, `idx_events_policy_to (policy_to)`.
+  `ComplianceDb.open()` runs them in `migrate()` and throws
+  `no such column: signer_address`, so the DB layer fails before the indexer
+  starts; `src/db.test.ts` fails the same way. Either the columns or the
+  indexes need to be reconciled.
+- The schema comment at the top of `src/db.ts` lists `multisig_signers`,
+  `multisig_threshold`, `aggregator_config`, and `circuit_breaker_state`, but
+  `migrate()` creates none of them and `updateState()` never writes them.
+  Multisig and aggregator events currently land in `events` only.
+
+Both are code-side issues rather than documentation ones — they are recorded
+here so the table list above can be trusted as the schema that actually exists.
 
 ---
 
@@ -250,8 +363,8 @@ WHERE e.event_type = 'AllowAdd'
    contract IDs, from `last_ledger + 1` to `latestLedger`.
 3. Decodes each event's XDR topics/data into typed structs.
 4. Applies events to both the raw `events` log and the materialised state
-   tables (`allowlist`, `denylist`, `jurisdictions`) inside a single SQLite
-   transaction per poll cycle.
+   tables (`allowlist`, `denylist`, `jurisdictions`, `audit_log`) inside a
+   single SQLite transaction per poll cycle.
 5. Persists the new `last_ledger` and sleeps until the next poll. Transient HTTP, network, and retryable JSON-RPC failures are retried with bounded exponential backoff before the next scheduled poll.
 
 Run the deterministic integration suite with `npm test`. It starts a local JSON-RPC fixture representing a deployed primitive contract, replays an `AllowAdd` state-changing event, and asserts both the raw event row and materialized allowlist row.
