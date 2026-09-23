@@ -50,6 +50,55 @@ For details on how issues are triaged, labeled, and prioritized, see
 8. **Open a pull request** against `main`, referencing the issue it closes
    (e.g. `Closes #12`). Describe what changed and why.
 
+## How reviews get assigned (CODEOWNERS)
+
+You don't pick reviewers here, and you don't need to ping anyone: every path in
+this repository has an owner in
+[`.github/CODEOWNERS`](./.github/CODEOWNERS), and GitHub reads that file when
+your pull request is opened.
+
+- **One area touched** — the owner of that path is requested for review
+  automatically. A PR that only changes `contracts/denylist-gate/` asks that
+  contract's owner.
+- **Several areas touched** — every affected owner is requested, and the PR
+  needs all of them. A PR that changes both `contracts/policy-engine/` and
+  `tools/indexer/` asks both owners, because a change to one can break the
+  other.
+- **A path with no entry of its own** — falls to the `*` catch-all at the
+  bottom of the file. That is why a new top-level directory still gets a
+  reviewer without a CODEOWNERS change.
+
+The owner requested in the sidebar is the source of truth: if the list looks
+wrong for what you changed, the fix belongs in `.github/CODEOWNERS` (open an
+issue for it) rather than in manual re-assignment on the PR.
+
+If CODEOWNERS is pointing at a stale handle, say so in the PR description —
+maintainers can still pull in the right reviewer while the file is being
+updated.
+
+### PRs that cross owned areas
+
+Some changes genuinely span owned areas — a contract change plus the indexer
+that reads its events, or a primitive plus the example that demonstrates it.
+Those PRs are welcome, but they are reviewed by several people, so keep them
+reviewable:
+
+1. **Open separate PRs when the parts are independent.** A docs fix and an
+   unrelated contract change are reviewed faster as two PRs with one owner
+   each than as one PR that needs two approvals.
+2. **When it can't be split, say why in the description.** List the owned
+   areas the diff touches and how they relate, so each owner knows what they
+   are being asked to check.
+3. **Keep each area's change self-contained.** Structure the commits so an
+   owner can review their part without holding the whole PR in their head.
+4. **Expect more rounds of feedback.** A cross-cutting PR is blocked until
+   every requested owner has approved; if one review is slow, it is usually
+   the reviewer waiting on the other area's decision rather than on you.
+5. **Flag the interface in one place.** If the change crosses a boundary
+   (a contract interface consumed by `tools/` or `web/`), describe the new
+   contract in the PR description and link the files on both sides, so the
+   owners are reviewing the same picture.
+
 ## Complexity labels and expected PR size
 
 The complexity label on an issue is also a signal for how big the resulting
