@@ -1,6 +1,52 @@
 //! `policy-engine` is a `#![no_std]` Soroban contract that composes multiple
 //! compliance checks into a single policy evaluation call.
 //!
+//! **Purpose**: give issuers a single configurable entrypoint that evaluates
+//! an ordered, admin-managed list of compliance checks (`CheckKind`) against
+//! a proposed transfer (`from`, `to`) and combines the results with AND
+//! (`CombineOp::All`) or OR (`CombineOp::Any`) logic. A passing policy returns
+//! `Ok(true)`; a failing policy returns `Ok(false)` and emits a `PolicyResult`
+//! event so the decision stays auditable on-chain instead of being rolled back
+//! as a contract error.
+//!
+//! **Callers**: an `admin` address configures the instance via `initialize`,
+//! `add_check` / `remove_check`, and `set_circuit_breaker`. Consumer contracts
+//! (typically a token's `transfer` path) call the read-only `evaluate` or
+//! `batch_evaluate` before moving funds. Any off-chain client or auditor can
+//! read back the active configuration via `get_checks`, `get_op`, and
+//! `get_policy` without needing admin rights.
+//!
+//! **Composition**: this contract calls into the primitive layer through
+//! `#[contractclient]` interfaces only and takes no direct crate dependency on
+//! its peers (the same pattern used by `compliance-aggregator` and
+//! `examples/denylist-gate-consumer`), so peer wasm exports never collide at
+//! link time. It composes with the other eight contracts in this repo as follows:
+//!
+//! - `denylist-gate`: `CheckKind::Denylist` calls `check(address)` on the
+//!   stored contract address. Under `All`, both `from` and `to` must clear it.
+//! - `jurisdiction-flag`: `CheckKind::Jurisdiction` calls
+//!   `is_permitted_jurisdiction(address, allowed_codes)` on the stored contract
+//!   address with per-check `allowed_codes`.
+//! - `allowlist-token`: `CheckKind::Allowlist` calls `is_allowed(address)` on
+//!   the stored contract address. The token itself remains the deploy-in-front
+//!   primitive that wallets call directly; the engine only queries it.
+//! - `circuit-breaker`: optional address registered via `initialize` or
+//!   `set_circuit_breaker`. When set and `is_frozen()` returns true, `evaluate`
+//!   short-circuits to `Ok(false)` without running any registered checks.
+//! - `compliance-aggregator`: sibling composition contract offering a fixed
+//!   AND over at most one denylist gate plus one jurisdiction flag. Neither
+//!   contract calls the other; use the aggregator for the simple fixed shape
+//!   and this engine when you need an ordered check list plus AND/OR choice.
+//! - `audit-log`: not called automatically. Every `evaluate` emits a
+//!   `PolicyResult` event (pass or fail) so indexers — or an opt-in `audit-log`
+//!   deployment wired by the deployer — can build a full audit trail.
+//! - `multisig-admin`: can be set as this contract's `admin` at `initialize`
+//!   time. `require_auth` then re-enters `__check_auth` with no code changes,
+//!   exactly as with the three original primitives.
+//! - `pausable` (`compliance-pausable` library): `add_check` and `remove_check`
+//!   are guarded by `require_not_paused_or`; reads such as `evaluate`,
+//!   `get_checks`, and `get_policy` keep working while paused.
+//!
 //! ## AND / OR design choice
 //!
 //! Compliance use cases almost always reduce to one of two logical shapes:
