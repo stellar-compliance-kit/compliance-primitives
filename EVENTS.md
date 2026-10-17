@@ -205,16 +205,16 @@ data   : {}
 
 #### `Frozen`
 
-Emitted when the admin freezes the circuit breaker.
+Emitted when the admin or a guardian freezes the circuit breaker.
 
 ```
-topics : ["frozen", <admin: Address>]
+topics : ["frozen", <caller: Address>]
 data   : {}
 ```
 
 | Field | Type | Placement | Description |
 |---|---|---|---|
-| `admin` | `Address` | topic | Admin address that froze the contract |
+| `caller` | `Address` | topic | Admin or guardian address that froze the contract |
 
 #### `Unfrozen`
 
