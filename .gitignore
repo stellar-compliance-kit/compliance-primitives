@@ -23,3 +23,6 @@ Cargo.lock.bak
 
 # Node tooling (scripts/check-accessibility.mjs) — see package.json.
 node_modules/
+
+# Old PR description that was accidentally committed as documentation
+docs/PR_DESCRIPTION.md
