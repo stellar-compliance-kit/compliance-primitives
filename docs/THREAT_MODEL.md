@@ -13,7 +13,7 @@
 |----------|------|
 | `allowlist-token` | Wraps an underlying asset and gates `transfer` so only allowlisted addresses may send/receive. Admin-managed allowlist, pausable, two-step admin transfer. |
 | `denylist-gate` | Maintains a denylist; `check(address)` is consulted before sensitive operations. Admin-managed, with an optional multisig signer set and a compliance-officer role. |
-| `jurisdiction-flag` | Maps addresses → jurisdiction codes (with optional expiry). `is_permitted_jurisdiction` is the read gate. Issuer-managed, with a compliance-officer role and an `upgrade` entry point. |
+| `jurisdiction-flag` | Maps addresses → jurisdiction codes (with optional expiry). `is_permitted_jurisdiction` is the read gate. Issuer-managed, with a compliance-officer role and timelocked upgrade entry points. |
 
 ## Rating scale
 
@@ -112,7 +112,7 @@ non-admin write path → storage-fill griefing not applicable.
   `remove_jurisdiction_multiple`) and holds the sole `upgrade` key.
 - `compliance_officer` role can also set/revoke flags.
 - `is_permitted_jurisdiction` is the read gate.
-- **`upgrade(env, issuer, new_wasm)` already exists** — relevant to #113.
+- Upgrades use issuer-only `propose_upgrade` / `commit_upgrade` / `cancel_upgrade` entry points with a minimum 17,280-ledger delay (~1 day).
 
 ### 3.1 Griefing
 | ID | Scenario | Sev | Lik | Mitigation |
@@ -150,8 +150,9 @@ No non-admin write path → storage-fill griefing not applicable.
 3. **Pause (#84/#85) and two-step admin (#74/#75/#76)** are the primary
    blast-radius limiters for admin compromise; several scenarios above assume
    they have landed. Track their merge before relying on A6/A7/D5/J5 mitigations.
-4. **`jurisdiction-flag::upgrade` is the most dangerous single key** (J6). #113
-   should introduce a delayed, reviewable upgrade before mainnet use.
+4. **`jurisdiction-flag` upgrades have an enforced one-day minimum review
+  window** (J6). Keep issuer monitoring and cancellation procedures available;
+  the delay does not by itself prevent a compromised issuer from upgrading.
 
 ## Open questions / follow-ups
 - Should `check` / `is_permitted_jurisdiction` be made callable only as an

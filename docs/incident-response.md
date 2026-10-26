@@ -167,13 +167,16 @@ continue.  Pausing only blocks further admin mutations.
 
 ### `jurisdiction-flag`
 
-**Has upgrade path**: yes — `upgrade(issuer, new_wasm_hash)` (single-step,
-issuer-only; see threat model J6 — this is less safe than the two-step variant).
+**Has upgrade path**: yes — issuer-only `propose_upgrade`, `commit_upgrade`,
+and `cancel_upgrade`. A proposal cannot be committed until at least 17,280
+ledgers (~1 day) have elapsed; cancel suspicious proposals before that point.
 
 **Preferred recovery path**:
 1. If a compliance officer key exists and is not compromised, use it to audit
    state (compliance officers can call `set_jurisdiction`).
-2. Rotate the issuer key if possible by redeploying or using a multisig wrapper.
+2. If an upgrade proposal is suspicious, cancel it with the issuer key before
+  its delay elapses. Rotate the issuer key if possible by redeploying or using
+  a multisig wrapper.
 3. Audit all `JurisdictionSet` / `JurisdictionRemoved` events from the
    compromise window.
 4. Correct any jurisdiction codes changed by the attacker.

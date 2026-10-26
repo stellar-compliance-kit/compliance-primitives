@@ -74,6 +74,8 @@ enum DataKey {
     Paused,
     /// Pending issuer address proposed via `propose_issuer`. Instance storage.
     PendingIssuer,
+    /// Pending issuer-authorized WASM upgrade proposal. Instance storage.
+    PendingUpgrade,
 }
 
 /// Emitted whenever a jurisdiction flag is set.
@@ -132,6 +134,14 @@ pub struct Paused {
 pub struct Unpaused {
     #[topic]
     pub issuer: Address,
+}
+
+/// Delayed issuer upgrade proposal.
+#[contracttype]
+#[derive(Clone)]
+pub struct UpgradeState {
+    pub new_wasm: BytesN<32>,
+    pub activated_at: u64,
 }
 
 #[contracterror]
@@ -625,7 +635,7 @@ impl JurisdictionFlag {
     /// upgrade. The issuer's auth is verified before the upgrade proceeds.
     pub fn upgrade(env: Env, issuer: Address, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
         Self::require_issuer(&env, &issuer)?;
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
         Ok(())
     }
 
