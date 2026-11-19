@@ -1189,3 +1189,34 @@ fn test_write_path_extends_instance_ttl() {
     client.set_jurisdiction(&issuer, &Address::generate(&env), &soroban_sdk::String::from_str(&env, "US"));
     assert_eq!(ttl(), INSTANCE_TTL_EXTEND_TO);
 }
+
+#[test]
+fn test_get_jurisdiction_expiry_returns_set_expiry() {
+    let env = Env::default();
+    let (issuer, _contract_id, client) = setup(&env);
+    let user = Address::generate(&env);
+    let code = String::from_str(&env, "US");
+    env.ledger()
+        .with_mut(|ledger| ledger.sequence_number = 10);
+
+    // No flag at all: no expiry.
+    assert_eq!(client.get_jurisdiction_expiry(&user), None);
+
+    client.set_jurisdiction_until(&issuer, &user, &code, &500);
+    assert_eq!(client.get_jurisdiction_expiry(&user), Some(500));
+
+    // Clearing the flag clears the expiry with it.
+    client.set_jurisdiction(&issuer, &user, &code);
+    assert_eq!(client.get_jurisdiction_expiry(&user), None);
+}
+
+#[test]
+fn test_get_jurisdiction_expiry_returns_none_for_unexpiring_flag() {
+    let env = Env::default();
+    let (issuer, _contract_id, client) = setup(&env);
+    let user = Address::generate(&env);
+    let code = String::from_str(&env, "GB");
+
+    client.set_jurisdiction(&issuer, &user, &code);
+    assert_eq!(client.get_jurisdiction_expiry(&user), None);
+}

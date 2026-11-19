@@ -114,6 +114,10 @@ enum DataKey {
     Frozen(Address),
     /// When `true`, `clawback` only succeeds against a frozen address. Instance storage.
     ClawbackRequiresFreeze,
+    /// Number of addresses currently holding a non-zero balance. Instance storage.
+    HolderCount,
+    /// Optional cap on `HolderCount`. Absent = unlimited. Instance storage.
+    MaxHolders,
 }
 
 #[contracttype]
@@ -296,6 +300,8 @@ pub enum Error {
     /// `clawback` was called against an address that is not frozen while
     /// `clawback_requires_freeze` is enabled.
     ClawbackRequiresFreeze = 15,
+    /// A transfer would add a new holder beyond the configured `MaxHolders`.
+    MaxHoldersReached = 16,
 }
 
 #[contract]
@@ -629,8 +635,49 @@ impl AllowlistToken {
             .instance()
             .get(&DataKey::Token)
             .ok_or(Error::NotInitialized)?;
+        let token_client = token::Client::new(&env, &token_address);
+        let from_before = token_client.balance(&from);
         token::StellarAssetClient::new(&env, &token_address).clawback(&from, &amount);
+        if from_before == amount {
+            // `from` held exactly the clawed-back amount, so it is no longer a holder.
+            let count = Self::read_holder_count(&env);
+            env.storage()
+                .instance()
+                .set(&DataKey::HolderCount, &count.saturating_sub(1));
+        }
         Clawback { admin, from, amount }.publish(&env);
+        Ok(())
+    }
+
+    /// Number of addresses currently holding a non-zero balance of the wrapped
+    /// token, as tracked by this contract.
+    ///
+    /// The counter follows movements made through `transfer` and `clawback`.
+    /// Balances that change through any other path (for example direct transfers
+    /// on the underlying token, or pre-existing balances from before deployment)
+    /// are not reflected.
+    pub fn holder_count(env: Env) -> u32 {
+        Self::read_holder_count(&env)
+    }
+
+    /// Returns the configured holder cap, or `None` if unlimited.
+    pub fn get_max_holders(env: Env) -> Option<u32> {
+        Self::read_max_holders(&env)
+    }
+
+    /// Set (`Some(max)`) or clear (`None`) the cap on holders. Admin-only.
+    ///
+    /// Once set, a `transfer` that would move tokens to an address without a
+    /// balance is rejected with `MaxHoldersReached` if it would push
+    /// `holder_count` above `max`. Transfers between existing holders are never
+    /// blocked by the cap. Lowering the cap below the current count does not
+    /// remove holders; it only blocks new ones until the count falls.
+    pub fn set_max_holders(env: Env, admin: Address, max: Option<u32>) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        match max {
+            Some(max) => env.storage().instance().set(&DataKey::MaxHolders, &max),
+            None => env.storage().instance().remove(&DataKey::MaxHolders),
+        }
         Ok(())
     }
 
@@ -976,7 +1023,25 @@ impl AllowlistToken {
             .get(&DataKey::Token)
             .ok_or(Error::NotInitialized)?;
         let token_client = token::Client::new(&env, &token_address);
+
+        // Holder accounting: read balances before and after the move so the
+        // counter reflects 0 -> non-zero and non-zero -> 0 transitions.
+        let from_before = token_client.balance(&from);
+        let to_before = token_client.balance(&to);
+        let (leaves, joins) =
+            Self::holder_transition(&from, &to, amount, from_before, to_before);
+        let count = Self::read_holder_count(&env);
+        let new_count = count.saturating_add(joins as u32).saturating_sub(leaves as u32);
+        if joins {
+            if let Some(max) = Self::read_max_holders(&env) {
+                if new_count > max {
+                    return Err(Error::MaxHoldersReached);
+                }
+            }
+        }
+
         token_client.transfer(&from, &to, &amount);
+        env.storage().instance().set(&DataKey::HolderCount, &new_count);
         Ok(true)
     }
 
@@ -1037,15 +1102,48 @@ impl AllowlistToken {
 
     fn is_allowed_and_extend_ttl(env: &Env, address: Address) -> bool {
         let key = DataKey::Allowed(address);
-        let allowed = env.storage().persistent().get(&key).unwrap_or(false);
-        if allowed {
-            env.storage().persistent().extend_ttl(
-                &key,
-                ALLOWED_TTL_THRESHOLD,
-                ALLOWED_TTL_EXTEND_TO,
-            );
+        let entry: Option<AllowlistEntry> = env.storage().persistent().get(&key);
+        match entry {
+            None => false,
+            Some(entry) => {
+                env.storage().persistent().extend_ttl(
+                    &key,
+                    ALLOWED_TTL_THRESHOLD,
+                    ALLOWED_TTL_EXTEND_TO,
+                );
+                match entry.expiration_ledger {
+                    None => true,
+                    Some(exp) => env.ledger().sequence() <= exp,
+                }
+            }
         }
-        Err(Error::NotAuthorized)
+    }
+
+    fn read_holder_count(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::HolderCount)
+            .unwrap_or(0)
+    }
+
+    fn read_max_holders(env: &Env) -> Option<u32> {
+        env.storage().instance().get(&DataKey::MaxHolders)
+    }
+
+    /// Returns `(leaves, joins)`: whether `from` ends the move with a zero balance
+    /// and whether `to` starts the move with a zero balance. A self-transfer or a
+    /// zero-amount move changes no holder.
+    fn holder_transition(
+        from: &Address,
+        to: &Address,
+        amount: i128,
+        from_before: i128,
+        to_before: i128,
+    ) -> (bool, bool) {
+        if amount <= 0 || from == to {
+            return (false, false);
+        }
+        (from_before == amount, to_before == 0)
     }
 
     fn reject_if_paused(env: &Env) -> Result<(), Error> {

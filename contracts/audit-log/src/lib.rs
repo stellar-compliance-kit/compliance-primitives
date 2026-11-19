@@ -418,6 +418,32 @@ impl AuditLog {
         Self::list_entries(env.clone(), start, limit).unwrap_or(Vec::new(&env))
     }
 
+    /// Return up to `n` of the most recent log entries, **newest first**.
+    ///
+    /// `n` is clamped to [`MAX_PAGE_SIZE`]. Fewer entries are returned when
+    /// the log holds fewer than `n`; an empty log yields an empty vector.
+    /// Lets dashboards read the tail of the log without computing offsets
+    /// from `entry_count()`.
+    pub fn latest_entries(env: Env, n: u32) -> Vec<LogEntry> {
+        let count = Self::entry_count(env.clone());
+        let take = (n.min(MAX_PAGE_SIZE) as u64).min(count);
+
+        let mut entries = Vec::new(&env);
+        let mut offset: u64 = 0;
+        while offset < take {
+            let index = count - 1 - offset;
+            if let Some(entry) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, LogEntry>(&DataKey::Entry(index))
+            {
+                entries.push_back(entry);
+            }
+            offset += 1;
+        }
+        entries
+    }
+
     /// Return the total number of entries recorded so far.
     pub fn entry_count(env: Env) -> u64 {
         env.storage()

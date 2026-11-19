@@ -16,7 +16,27 @@ struct MockToken;
 impl MockToken {
     pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
         from.require_auth();
+        if from != to {
+            let mut balances = Self::balances(&env);
+            let from_bal = balances.get(from.clone()).unwrap_or(0);
+            let to_bal = balances.get(to.clone()).unwrap_or(0);
+            balances.set(from.clone(), from_bal - amount);
+            balances.set(to.clone(), to_bal + amount);
+            Self::store_balances(&env, &balances);
+        }
         env.storage().instance().set(&Symbol::new(&env, "last"), &(from, to, amount));
+    }
+
+    /// Test-only: credit `to` without going through the allowlist wrapper.
+    pub fn mint(env: Env, to: Address, amount: i128) {
+        let mut balances = Self::balances(&env);
+        let current = balances.get(to.clone()).unwrap_or(0);
+        balances.set(to, current + amount);
+        Self::store_balances(&env, &balances);
+    }
+
+    pub fn balance(env: Env, address: Address) -> i128 {
+        Self::balances(&env).get(address).unwrap_or(0)
     }
 
     pub fn last_transfer(env: Env) -> Option<(Address, Address, i128)> {
@@ -24,6 +44,10 @@ impl MockToken {
     }
 
     pub fn clawback(env: Env, from: Address, amount: i128) {
+        let mut balances = Self::balances(&env);
+        let from_bal = balances.get(from.clone()).unwrap_or(0);
+        balances.set(from.clone(), from_bal - amount);
+        Self::store_balances(&env, &balances);
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "clawback"), &(from, amount));
@@ -31,6 +55,17 @@ impl MockToken {
 
     pub fn last_clawback(env: Env) -> Option<(Address, i128)> {
         env.storage().instance().get(&Symbol::new(&env, "clawback"))
+    }
+
+    fn balances(env: &Env) -> Map<Address, i128> {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(env, "bal"))
+            .unwrap_or(Map::new(env))
+    }
+
+    fn store_balances(env: &Env, balances: &Map<Address, i128>) {
+        env.storage().instance().set(&Symbol::new(env, "bal"), balances);
     }
 }
 
@@ -1591,4 +1626,103 @@ fn test_delegated_valid_until_ledger_is_bound_by_signature() {
     );
     assert_eq!(result, Err(Ok(Error::NotAuthorized)));
     assert!(!client.is_allowed(&alice));
+}
+
+#[test]
+fn test_holder_count_follows_zero_nonzero_transitions() {
+    let env = Env::default();
+    let (admin, token_id, _contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    client.add_to_allowlist(&admin, &alice, &None);
+    client.add_to_allowlist(&admin, &bob, &None);
+    MockTokenClient::new(&env, &token_id).mint(&alice, &1000);
+
+    assert_eq!(client.holder_count(), 0);
+
+    // alice drains to zero, bob goes 0 -> non-zero: still one holder.
+    client.transfer(&alice, &bob, &1000);
+    assert_eq!(client.holder_count(), 1);
+
+    // alice 0 -> 400: second holder.
+    client.transfer(&bob, &alice, &400);
+    assert_eq!(client.holder_count(), 2);
+
+    // bob drains to zero: back to one holder.
+    client.transfer(&bob, &alice, &600);
+    assert_eq!(client.holder_count(), 1);
+}
+
+#[test]
+fn test_holder_count_unchanged_by_self_transfer() {
+    let env = Env::default();
+    let (admin, token_id, _contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+    client.add_to_allowlist(&admin, &alice, &None);
+    MockTokenClient::new(&env, &token_id).mint(&alice, &1000);
+
+    client.transfer(&alice, &alice, &1000);
+    assert_eq!(client.holder_count(), 0);
+}
+
+#[test]
+fn test_clawback_drops_holder_count_when_balance_reaches_zero() {
+    let env = Env::default();
+    let (admin, token_id, _contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    client.add_to_allowlist(&admin, &alice, &None);
+    client.add_to_allowlist(&admin, &bob, &None);
+    MockTokenClient::new(&env, &token_id).mint(&alice, &1000);
+
+    client.transfer(&alice, &bob, &600);
+    assert_eq!(client.holder_count(), 1);
+    client.transfer(&alice, &bob, &400);
+    assert_eq!(client.holder_count(), 1);
+
+    client.clawback(&admin, &bob, &600);
+    assert_eq!(client.holder_count(), 1, "partial clawback keeps bob as a holder");
+
+    client.clawback(&admin, &bob, &400);
+    assert_eq!(client.holder_count(), 0, "full clawback removes bob as a holder");
+}
+
+#[test]
+fn test_max_holders_blocks_new_holder_over_cap() {
+    let env = Env::default();
+    let (admin, token_id, _contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    client.add_to_allowlist(&admin, &alice, &None);
+    client.add_to_allowlist(&admin, &bob, &None);
+    MockTokenClient::new(&env, &token_id).mint(&alice, &1000);
+
+    client.set_max_holders(&admin, &Some(1));
+    assert_eq!(client.get_max_holders(), Some(1));
+
+    // alice -> bob moves everything: bob is the single holder, within the cap.
+    client.transfer(&alice, &bob, &1000);
+    assert_eq!(client.holder_count(), 1);
+
+    // Sending to alice would add a second holder and must be rejected.
+    let result = client.try_transfer(&bob, &alice, &400);
+    assert_eq!(result, Err(Ok(Error::MaxHoldersReached)));
+    assert_eq!(client.holder_count(), 1);
+
+    // Clearing the cap lets the same transfer through.
+    client.set_max_holders(&admin, &None);
+    assert_eq!(client.get_max_holders(), None);
+    client.transfer(&bob, &alice, &400);
+    assert_eq!(client.holder_count(), 2);
+}
+
+#[test]
+fn test_set_max_holders_rejects_non_admin() {
+    let env = Env::default();
+    let (_admin, _token_id, _contract_id, client) = setup(&env);
+    let intruder = Address::generate(&env);
+
+    let result = client.try_set_max_holders(&intruder, &Some(1));
+    assert_eq!(result, Err(Ok(Error::NotAuthorized)));
+    assert_eq!(client.get_max_holders(), None);
 }

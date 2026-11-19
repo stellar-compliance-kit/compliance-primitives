@@ -339,6 +339,35 @@ pub const INSTANCE_TTL_THRESHOLD: u32 = 120_960;
 /// ~5s/ledger).
 pub const INSTANCE_TTL_EXTEND_TO: u32 = 1_555_200;
 
+/// Outcome of one configured check for a `(from, to)` pair, as reported by
+/// [`PolicyEngine::evaluate_dry_run`].
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CheckOutcome {
+    /// Zero-based position of the check in the registered policy list.
+    pub check_index: u32,
+    /// Short name of the check variant, e.g. `"Denylist"`.
+    pub kind: Symbol,
+    /// Whether the check passed for the `from` address.
+    pub from_passed: bool,
+    /// Whether the check passed for the `to` address.
+    pub to_passed: bool,
+}
+
+/// Result of [`PolicyEngine::evaluate_dry_run`].
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DryRunResult {
+    /// Overall policy outcome, identical to what `evaluate` would return for
+    /// the same pair at the same ledger.
+    pub passed: bool,
+    /// Whether the configured circuit-breaker is currently frozen. When `true`,
+    /// `passed` is `false` regardless of the individual checks.
+    pub circuit_breaker_frozen: bool,
+    /// Per-check outcomes, in registration order. Every check is evaluated.
+    pub checks: Vec<CheckOutcome>,
+}
+
 /// Emitted by `evaluate` regardless of the pass/fail outcome so that
 /// off-chain compliance tooling can build a full audit trail even when the
 /// policy passes (which wouldn't produce an error event).
@@ -701,6 +730,69 @@ impl PolicyEngine {
         Ok(result)
     }
 
+    /// Preview the policy decision for `(from, to)` without recording it.
+    ///
+    /// Read-only: emits no `PolicyResult` event and writes nothing to this
+    /// contract's storage. Every check is evaluated, so `checks` reports the
+    /// outcome of each one, which `evaluate` does not do under `CombineOp::All`
+    /// (it stops at the first failure). `passed` follows the same combine rules
+    /// as `evaluate`, including the circuit-breaker short-circuit.
+    ///
+    /// Each check still makes its usual cross-contract call to the contract it
+    /// targets. The read-only guarantee covers this contract only.
+    pub fn evaluate_dry_run(env: Env, from: Address, to: Address) -> Result<DryRunResult, Error> {
+        let checks: Vec<CheckKind> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Checks)
+            .ok_or(Error::NotInitialized)?;
+        let op: CombineOp = env
+            .storage()
+            .instance()
+            .get(&DataKey::CombineOp)
+            .ok_or(Error::NotInitialized)?;
+
+        let circuit_breaker_frozen = match env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::CircuitBreaker)
+        {
+            Some(addr) => CircuitBreakerClient::new(&env, &addr).is_frozen(),
+            None => false,
+        };
+
+        let mut outcomes = Vec::new(&env);
+        let mut all_pass = true;
+        let mut any_pass = false;
+        for i in 0..checks.len() {
+            let check = checks.get(i).unwrap();
+            let from_passed = Self::run_check(&env, &check, &from);
+            let to_passed = Self::run_check(&env, &check, &to);
+            let both = from_passed && to_passed;
+            all_pass &= both;
+            any_pass |= both;
+            outcomes.push_back(CheckOutcome {
+                check_index: i,
+                kind: Self::check_kind_symbol(&env, &check),
+                from_passed,
+                to_passed,
+            });
+        }
+
+        // Same combine rules as `evaluate_inner`: `All` is vacuously true for an
+        // empty policy, `Any` is false.
+        let policy_passed = match op {
+            CombineOp::All => all_pass,
+            CombineOp::Any => any_pass,
+        };
+
+        Ok(DryRunResult {
+            passed: policy_passed && !circuit_breaker_frozen,
+            circuit_breaker_frozen,
+            checks: outcomes,
+        })
+    }
+
     fn evaluate_inner(
         env: &Env,
         checks: &Vec<CheckKind>,
@@ -926,6 +1018,9 @@ mod test_utils;
 
 #[cfg(test)]
 mod test;
+
+#[cfg(test)]
+mod dry_run_test;
 
 #[cfg(test)]
 mod fuzz;

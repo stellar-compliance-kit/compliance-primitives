@@ -577,3 +577,44 @@ fn test_record_rejects_auth_from_address_other_than_source() {
     assert!(result.is_err(), "record must fail without the source's auth");
     assert_eq!(client.entry_count(), 0u64);
 }
+
+#[test]
+fn test_latest_entries_returns_newest_first() {
+    let env = Env::default();
+    let (_admin, _contract_id, client) = setup(&env);
+    let source = Address::generate(&env);
+    let subject = Address::generate(&env);
+    let kind = Symbol::new(&env, "deny_add");
+
+    for i in 0..5u32 {
+        let label = std::format!("entry-{i}");
+        let detail = soroban_sdk::String::from_str(&env, &label);
+        client.record(&source, &kind, &subject, &detail);
+    }
+
+    let latest = client.latest_entries(&3u32);
+    assert_eq!(latest.len(), 3);
+    assert_eq!(latest.get(0).unwrap().detail, soroban_sdk::String::from_str(&env, "entry-4"));
+    assert_eq!(latest.get(1).unwrap().detail, soroban_sdk::String::from_str(&env, "entry-3"));
+    assert_eq!(latest.get(2).unwrap().detail, soroban_sdk::String::from_str(&env, "entry-2"));
+}
+
+#[test]
+fn test_latest_entries_clamps_and_handles_short_log() {
+    let env = Env::default();
+    let (_admin, _contract_id, client) = setup(&env);
+
+    // Empty log yields an empty vector.
+    assert_eq!(client.latest_entries(&10u32).len(), 0);
+
+    let source = Address::generate(&env);
+    let subject = Address::generate(&env);
+    let kind = Symbol::new(&env, "deny_add");
+    let detail = soroban_sdk::String::from_str(&env, "only");
+    client.record(&source, &kind, &subject, &detail);
+
+    // Asking for more than exist returns what is there.
+    assert_eq!(client.latest_entries(&10u32).len(), 1);
+    // Oversized n is clamped to MAX_PAGE_SIZE rather than rejected.
+    assert_eq!(client.latest_entries(&(MAX_PAGE_SIZE + 50)).len(), 1);
+}
