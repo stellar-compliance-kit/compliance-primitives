@@ -405,3 +405,38 @@ fn test_budget_regression_is_frozen() {
     let baseline = read_baseline(&baseline_path(), "circuit-breaker.is_frozen");
     assert_budget_within_threshold(measured, baseline, "circuit-breaker is_frozen");
 }
+
+#[test]
+fn test_add_and_remove_guardian_emit_events() {
+    let env = Env::default();
+    let (admin, client) = setup(&env);
+    let guardian = Address::generate(&env);
+
+    client.add_guardian(&admin, &guardian);
+    let added = env.events().all();
+    let (_contract_id, topics, _data) = added.last().unwrap();
+    assert_eq!(
+        topics.get_unchecked(0),
+        soroban_sdk::Symbol::new(&env, "guardian_added").into_val(&env)
+    );
+    assert_eq!(topics.get_unchecked(1), admin.clone().into_val(&env));
+
+    // Adding an existing guardian must NOT emit another event.
+    let count = env.events().all().len();
+    client.add_guardian(&admin, &guardian);
+    assert_eq!(env.events().all().len(), count);
+
+    client.remove_guardian(&admin, &guardian);
+    let removed = env.events().all();
+    let (_contract_id, topics, _data) = removed.last().unwrap();
+    assert_eq!(
+        topics.get_unchecked(0),
+        soroban_sdk::Symbol::new(&env, "guardian_removed").into_val(&env)
+    );
+    assert_eq!(topics.get_unchecked(1), admin.clone().into_val(&env));
+
+    // Removing a non-guardian must NOT emit another event.
+    let count = env.events().all().len();
+    client.remove_guardian(&admin, &guardian);
+    assert_eq!(env.events().all().len(), count);
+}

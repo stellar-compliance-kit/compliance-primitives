@@ -131,6 +131,31 @@ pub struct IssuerProposalCancelled {
     pub issuer: Address,
 }
 
+/// Emitted when `set_compliance_officer` assigns the compliance-officer role.
+#[contractevent]
+pub struct ComplianceOfficerSet {
+    #[topic]
+    pub issuer: Address,
+    pub officer: Address,
+}
+
+/// Emitted when `revoke_compliance_officer` removes an existing officer.
+/// `officer` is the address that held the role before revocation.
+#[contractevent]
+pub struct ComplianceOfficerRevoked {
+    #[topic]
+    pub issuer: Address,
+    pub officer: Address,
+}
+
+/// Emitted when `upgrade` replaces the contract WASM.
+#[contractevent]
+pub struct UpgradePerformed {
+    #[topic]
+    pub issuer: Address,
+    pub new_wasm_hash: BytesN<32>,
+}
+
 #[contractevent]
 pub struct Paused {
     #[topic]
@@ -330,6 +355,11 @@ impl JurisdictionFlag {
         env.storage()
             .instance()
             .set(&DataKey::ComplianceOfficer, &officer);
+        ComplianceOfficerSet {
+            issuer: issuer.clone(),
+            officer,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -350,9 +380,20 @@ impl JurisdictionFlag {
     /// Auth: gated by [`require_issuer`] — only the issuer may revoke the delegated role.
     pub fn revoke_compliance_officer(env: Env, issuer: Address) -> Result<(), Error> {
         Self::require_issuer(&env, &issuer)?;
-        env.storage()
+        if let Some(officer) = env
+            .storage()
             .instance()
-            .remove(&DataKey::ComplianceOfficer);
+            .get::<_, Address>(&DataKey::ComplianceOfficer)
+        {
+            env.storage()
+                .instance()
+                .remove(&DataKey::ComplianceOfficer);
+            ComplianceOfficerRevoked {
+                issuer: issuer.clone(),
+                officer,
+            }
+            .publish(&env);
+        }
         Ok(())
     }
 
@@ -654,6 +695,11 @@ impl JurisdictionFlag {
     pub fn upgrade(env: Env, issuer: Address, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
         Self::require_issuer(&env, &issuer)?;
         env.storage().instance().remove(&DataKey::PendingUpgrade);
+        UpgradePerformed {
+            issuer,
+            new_wasm_hash,
+        }
+        .publish(&env);
         Ok(())
     }
 

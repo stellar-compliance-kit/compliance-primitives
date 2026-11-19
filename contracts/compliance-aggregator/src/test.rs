@@ -28,7 +28,8 @@ use super::*;
 use circuit_breaker::{CircuitBreaker, CircuitBreakerClient as CbClient};
 use denylist_gate::{DenylistGate, DenylistGateClient};
 use jurisdiction_flag::{JurisdictionFlag, JurisdictionFlagClient};
-use soroban_sdk::testutils::Address as _;
+use soroban_sdk::testutils::{Address as _, Events as _};
+use soroban_sdk::IntoVal;
 use soroban_sdk::{vec, Env, String};
 
 // ---------------------------------------------------------------------------
@@ -1259,4 +1260,46 @@ fn test_every_admin_write_path_extends_instance_ttl() {
     age(&env);
     client.set_admin(&agg_admin, &new_admin);
     assert_eq!(instance_ttl(&env, &agg_id), INSTANCE_TTL_EXTEND_TO);
+}
+
+#[test]
+fn test_clear_denylist_gate_emits_event_with_previous() {
+    let env = Env::default();
+    let (_gate_admin, gate_id, _flag_issuer, _flag_id, agg_admin, _agg_id, agg_client) =
+        setup_all(&env);
+
+    agg_client.clear_denylist_gate(&agg_admin);
+    let events = env.events().all();
+    let (_contract_id, topics, _data) = events.last().unwrap();
+    assert_eq!(
+        topics.get_unchecked(0),
+        soroban_sdk::Symbol::new(&env, "denylist_gate_cleared").into_val(&env)
+    );
+    assert_eq!(topics.get_unchecked(1), gate_id.into_val(&env));
+
+    // Clearing again (nothing registered) must NOT emit another event.
+    let count = env.events().all().len();
+    agg_client.clear_denylist_gate(&agg_admin);
+    assert_eq!(env.events().all().len(), count);
+}
+
+#[test]
+fn test_clear_jurisdiction_flag_emits_event_with_previous() {
+    let env = Env::default();
+    let (_gate_admin, _gate_id, _flag_issuer, flag_id, agg_admin, _agg_id, agg_client) =
+        setup_all(&env);
+
+    agg_client.clear_jurisdiction_flag(&agg_admin);
+    let events = env.events().all();
+    let (_contract_id, topics, _data) = events.last().unwrap();
+    assert_eq!(
+        topics.get_unchecked(0),
+        soroban_sdk::Symbol::new(&env, "jurisdiction_flag_cleared").into_val(&env)
+    );
+    assert_eq!(topics.get_unchecked(1), flag_id.into_val(&env));
+
+    // Clearing again must NOT emit another event.
+    let count = env.events().all().len();
+    agg_client.clear_jurisdiction_flag(&agg_admin);
+    assert_eq!(env.events().all().len(), count);
 }

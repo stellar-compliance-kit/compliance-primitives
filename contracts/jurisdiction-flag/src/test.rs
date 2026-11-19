@@ -1189,3 +1189,34 @@ fn test_write_path_extends_instance_ttl() {
     client.set_jurisdiction(&issuer, &Address::generate(&env), &soroban_sdk::String::from_str(&env, "US"));
     assert_eq!(ttl(), INSTANCE_TTL_EXTEND_TO);
 }
+
+#[test]
+fn test_set_and_revoke_compliance_officer_emit_events() {
+    use soroban_sdk::IntoVal;
+    let env = Env::default();
+    let (issuer, _contract_id, client) = setup(&env);
+    let officer = Address::generate(&env);
+
+    client.set_compliance_officer(&issuer, &officer);
+    let events = env.events().all();
+    let (_contract_id, topics, _data) = events.last().unwrap();
+    assert_eq!(
+        topics.get_unchecked(0),
+        soroban_sdk::Symbol::new(&env, "compliance_officer_set").into_val(&env)
+    );
+    assert_eq!(topics.get_unchecked(1), issuer.clone().into_val(&env));
+
+    client.revoke_compliance_officer(&issuer);
+    let events = env.events().all();
+    let (_contract_id, topics, _data) = events.last().unwrap();
+    assert_eq!(
+        topics.get_unchecked(0),
+        soroban_sdk::Symbol::new(&env, "compliance_officer_revoked").into_val(&env)
+    );
+    assert_eq!(topics.get_unchecked(1), issuer.clone().into_val(&env));
+
+    // Revoking when no officer is set must NOT emit another event.
+    let count = env.events().all().len();
+    client.revoke_compliance_officer(&issuer);
+    assert_eq!(env.events().all().len(), count);
+}

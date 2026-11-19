@@ -298,6 +298,22 @@ pub struct JurisdictionFlagSet {
     pub flag: Address,
 }
 
+/// Emitted when `clear_denylist_gate` unregisters the denylist-gate check.
+/// `previous` is the address that was registered before the clear.
+#[contractevent]
+pub struct DenylistGateCleared {
+    #[topic]
+    pub previous: Address,
+}
+
+/// Emitted when `clear_jurisdiction_flag` unregisters the jurisdiction check.
+/// `previous` is the address that was registered before the clear.
+#[contractevent]
+pub struct JurisdictionFlagCleared {
+    #[topic]
+    pub previous: Address,
+}
+
 #[contractevent]
 pub struct CircuitBreakerSet {
     #[topic]
@@ -456,7 +472,14 @@ impl ComplianceAggregator {
     pub fn clear_denylist_gate(env: Env, admin: Address) -> Result<(), Error> {
         compliance_pausable::require_not_paused_or(&env, Error::ContractPaused)?;
         Self::require_admin(&env, &admin)?;
-        env.storage().instance().remove(&DataKey::DenylistGate);
+        if let Some(previous) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey::DenylistGate)
+        {
+            env.storage().instance().remove(&DataKey::DenylistGate);
+            DenylistGateCleared { previous }.publish(&env);
+        }
         extend_instance_ttl(&env);
         Ok(())
     }
@@ -466,7 +489,14 @@ impl ComplianceAggregator {
     pub fn clear_jurisdiction_flag(env: Env, admin: Address) -> Result<(), Error> {
         compliance_pausable::require_not_paused_or(&env, Error::ContractPaused)?;
         Self::require_admin(&env, &admin)?;
-        env.storage().instance().remove(&DataKey::JurisdictionFlag);
+        if let Some(previous) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey::JurisdictionFlag)
+        {
+            env.storage().instance().remove(&DataKey::JurisdictionFlag);
+            JurisdictionFlagCleared { previous }.publish(&env);
+        }
         extend_instance_ttl(&env);
         Ok(())
     }

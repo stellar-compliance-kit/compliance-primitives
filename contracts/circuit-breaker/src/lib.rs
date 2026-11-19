@@ -148,6 +148,22 @@ pub trait AuditLogInterface {
     fn record(env: Env, source: Address, kind: Symbol, subject: Address, detail: String);
 }
 
+/// Emitted when `guardian` is added to the freeze-only set via `add_guardian`.
+#[contractevent]
+pub struct GuardianAdded {
+    #[topic]
+    pub admin: Address,
+    pub guardian: Address,
+}
+
+/// Emitted when `guardian` is removed from the freeze-only set via `remove_guardian`.
+#[contractevent]
+pub struct GuardianRemoved {
+    #[topic]
+    pub admin: Address,
+    pub guardian: Address,
+}
+
 /// Emitted whenever the contract is upgraded to a new WASM implementation,
 /// for on-chain auditability of the upgrade path.
 #[contractevent]
@@ -260,8 +276,13 @@ impl CircuitBreaker {
         Self::require_admin(&env, &admin)?;
         let mut guardians = Self::guardians(&env);
         if !Self::contains(&guardians, &guardian) {
-            guardians.push_back(guardian);
+            guardians.push_back(guardian.clone());
             env.storage().instance().set(&DataKey::Guardians, &guardians);
+            GuardianAdded {
+                admin: admin.clone(),
+                guardian,
+            }
+            .publish(&env);
         }
         Ok(())
     }
@@ -279,6 +300,11 @@ impl CircuitBreaker {
                 }
             }
             env.storage().instance().set(&DataKey::Guardians, &kept);
+            GuardianRemoved {
+                admin: admin.clone(),
+                guardian,
+            }
+            .publish(&env);
         }
         Ok(())
     }
