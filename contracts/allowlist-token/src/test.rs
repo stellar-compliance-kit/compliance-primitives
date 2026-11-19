@@ -516,25 +516,46 @@ fn test_delegated_add_to_allowlist_rejects_non_admin_key() {
 #[test]
 fn test_remove_from_allowlist_never_added_is_noop() {
     let env = Env::default();
-    let (admin, _token_id, contract_id, client) = setup(&env);
+    let (admin, _token_id, _contract_id, client) = setup(&env);
     let never_added = Address::generate(&env);
 
     assert!(!client.is_allowed(&never_added));
 
     client.remove_from_allowlist(&admin, &never_added);
 
+    // No AllowRemove event for an address that was never allowlisted.
+    assert_eq!(env.events().all(), vec![&env]);
+    assert!(!client.is_allowed(&never_added));
+    assert!(client.get_allowlist_entry(&never_added).is_none());
+}
+
+#[test]
+fn test_remove_multiple_skips_absent_addresses_without_events() {
+    let env = Env::default();
+    let (admin, _token_id, contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+    let never_added = Address::generate(&env);
+    client.add_to_allowlist(&admin, &alice, &None);
+
+    client.remove_multiple_from_allowlist(
+        &admin,
+        &vec![&env, never_added.clone(), alice.clone()],
+    );
+
+    // Only the real removal (alice) emits an event; the absent address does not.
     assert_eq!(
         env.events().all(),
         vec![
             &env,
             (
                 contract_id.clone(),
-                (Symbol::new(&env, "allow_remove"), never_added.clone()).into_val(&env),
+                (Symbol::new(&env, "allow_remove"), alice.clone()).into_val(&env),
                 Map::<Symbol, Val>::new(&env).into_val(&env),
             ),
         ]
     );
-    assert!(!client.is_allowed(&never_added));
+    assert!(!client.is_allowed(&alice));
+    assert!(client.get_allowlist_entry(&never_added).is_none());
 }
 
 #[test]
@@ -1591,4 +1612,181 @@ fn test_delegated_valid_until_ledger_is_bound_by_signature() {
     );
     assert_eq!(result, Err(Ok(Error::NotAuthorized)));
     assert!(!client.is_allowed(&alice));
+}
+
+// ─── Time-limited allowlist entries (add_to_allowlist_until) ─────────────────
+
+#[test]
+fn test_add_to_allowlist_until_stores_expiry_on_entry() {
+    let env = Env::default();
+    let (admin, _token_id, _contract_id, client) = setup(&env);
+    env.ledger().set_sequence_number(1_000);
+    let alice = Address::generate(&env);
+
+    client.add_to_allowlist_until(&admin, &alice, &1_500);
+
+    let entry = client.get_allowlist_entry(&alice).unwrap();
+    assert_eq!(entry.expiration_ledger, Some(1_500));
+}
+
+#[test]
+fn test_add_to_allowlist_until_is_allowed_through_boundary_ledger() {
+    let env = Env::default();
+    let (admin, _token_id, _contract_id, client) = setup(&env);
+    env.ledger().set_sequence_number(1_000);
+    let alice = Address::generate(&env);
+    client.add_to_allowlist_until(&admin, &alice, &1_500);
+
+    // Inclusive: still allowed on the expiry ledger itself.
+    env.ledger().set_sequence_number(1_500);
+    assert!(client.is_allowed(&alice));
+    assert!(client.is_compliant(&alice));
+
+    // Not allowed from the ledger after expiry onward.
+    env.ledger().set_sequence_number(1_501);
+    assert!(!client.is_allowed(&alice));
+    assert!(!client.is_compliant(&alice));
+}
+
+#[test]
+fn test_add_to_allowlist_until_rejects_expiry_in_the_past() {
+    let env = Env::default();
+    let (admin, _token_id, _contract_id, client) = setup(&env);
+    env.ledger().set_sequence_number(1_000);
+    let alice = Address::generate(&env);
+
+    assert_eq!(
+        client.try_add_to_allowlist_until(&admin, &alice, &999),
+        Err(Ok(Error::InvalidInput))
+    );
+    assert!(!client.is_allowed(&alice));
+}
+
+#[test]
+fn test_transfer_blocked_after_time_limited_entry_expires() {
+    let env = Env::default();
+    let (admin, _token_id, _contract_id, client) = setup(&env);
+    env.ledger().set_sequence_number(1_000);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    client.add_to_allowlist_until(&admin, &alice, &1_500);
+    client.add_to_allowlist(&admin, &bob, &None);
+
+    // On the expiry ledger the transfer is still forwarded.
+    env.ledger().set_sequence_number(1_500);
+    assert!(client.transfer(&alice, &bob, &10));
+
+    // After expiry the expired sender is blocked; the entry itself is kept.
+    env.ledger().set_sequence_number(1_501);
+    assert!(!client.transfer(&alice, &bob, &10));
+    assert_eq!(
+        client.get_allowlist_entry(&alice).unwrap().expiration_ledger,
+        Some(1_500)
+    );
+}
+
+// ─── Allowlist provenance (added_by / added_at_ledger) ───────────────────────
+
+#[test]
+fn test_add_to_allowlist_records_approver_and_ledger() {
+    let env = Env::default();
+    let (admin, _token_id, _contract_id, client) = setup(&env);
+    env.ledger().set_sequence_number(777);
+    let alice = Address::generate(&env);
+
+    client.add_to_allowlist(&admin, &alice, &None);
+
+    let entry = client.get_allowlist_entry(&alice).unwrap();
+    assert_eq!(entry.expiration_ledger, None);
+    assert_eq!(entry.added_by, Some(admin));
+    assert_eq!(entry.added_at_ledger, Some(777));
+}
+
+#[test]
+fn test_add_multiple_to_allowlist_records_approver_and_ledger() {
+    let env = Env::default();
+    let (admin, _token_id, _contract_id, client) = setup(&env);
+    env.ledger().set_sequence_number(888);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+
+    client.add_multiple_to_allowlist(&admin, &vec![&env, alice.clone(), bob.clone()], &None);
+
+    for addr in [&alice, &bob] {
+        let entry = client.get_allowlist_entry(addr).unwrap();
+        assert_eq!(entry.added_by, Some(admin.clone()));
+        assert_eq!(entry.added_at_ledger, Some(888));
+    }
+}
+
+#[test]
+fn test_delegated_add_records_configured_admin_as_approver() {
+    let env = Env::default();
+    let (admin, _token_id, _contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+    let signing_key = delegated_signing_key();
+    let pubkey = BytesN::from_array(&env, &signing_key.verifying_key().to_bytes());
+    client.set_delegated_admin_key(&admin, &pubkey);
+
+    env.ledger().set_timestamp(100);
+    env.ledger().set_sequence_number(555);
+    let expiry = 200u64;
+    let signature = sign_delegated_action(&env, &signing_key, &alice, 1, expiry);
+    client.add_to_allowlist_delegated(
+        &admin,
+        &alice,
+        &1u64,
+        &expiry,
+        &default_valid_until(&env),
+        &signature,
+    );
+
+    let entry = client.get_allowlist_entry(&alice).unwrap();
+    assert_eq!(entry.added_by, Some(admin));
+    assert_eq!(entry.added_at_ledger, Some(555));
+}
+
+#[test]
+fn test_readding_entry_replaces_provenance_with_latest_approval() {
+    let env = Env::default();
+    let (admin, _token_id, _contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+
+    env.ledger().set_sequence_number(10);
+    client.add_to_allowlist(&admin, &alice, &None);
+    env.ledger().set_sequence_number(20);
+    client.add_to_allowlist(&admin, &alice, &None);
+
+    assert_eq!(client.get_allowlist_entry(&alice).unwrap().added_at_ledger, Some(20));
+}
+
+#[test]
+fn test_remove_clears_provenance() {
+    let env = Env::default();
+    let (admin, _token_id, _contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+    client.add_to_allowlist(&admin, &alice, &None);
+
+    client.remove_from_allowlist(&admin, &alice);
+
+    assert!(client.get_allowlist_entry(&alice).is_none());
+}
+
+#[test]
+fn test_entry_without_provenance_reports_none_for_approver_fields() {
+    let env = Env::default();
+    let (_admin, _token_id, contract_id, client) = setup(&env);
+    let legacy = Address::generate(&env);
+
+    // Simulate an entry written before provenance was recorded.
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::Allowed(legacy.clone()), &AllowlistEntry { expiration_ledger: None });
+    });
+
+    let entry = client.get_allowlist_entry(&legacy).unwrap();
+    assert_eq!(entry.added_by, None);
+    assert_eq!(entry.added_at_ledger, None);
+    assert!(client.is_allowed(&legacy));
 }

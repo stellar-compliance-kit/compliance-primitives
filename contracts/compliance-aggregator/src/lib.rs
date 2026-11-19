@@ -198,10 +198,10 @@ pub trait CircuitBreakerInterface {
 ///
 /// Extend the instance TTL when its remaining TTL drops below this many
 /// ledgers (~7 days at ~5s/ledger on mainnet).
-pub(crate) const INSTANCE_TTL_THRESHOLD: u32 = 120_960; // ~7 days
+pub(crate) const INSTANCE_TTL_THRESHOLD: u32 = compliance_ttl::TTL_THRESHOLD; // ~7 days
 
 /// Target remaining instance TTL after extension (~90 days at ~5s/ledger).
-pub(crate) const INSTANCE_TTL_EXTEND_TO: u32 = 1_555_200; // ~90 days
+pub(crate) const INSTANCE_TTL_EXTEND_TO: u32 = compliance_ttl::TTL_EXTEND_TO; // ~90 days
 
 /// Bump the contract instance TTL (and therefore every instance-storage
 /// entry) according to the policy documented above. Called from every

@@ -333,11 +333,11 @@ pub const MAX_CHECKS: u32 = 16;
 
 /// Extend the contract's instance storage when its remaining TTL drops below
 /// this many ledgers (~7 days at ~5s/ledger).
-pub const INSTANCE_TTL_THRESHOLD: u32 = 120_960;
+pub const INSTANCE_TTL_THRESHOLD: u32 = compliance_ttl::TTL_THRESHOLD;
 
 /// Target remaining TTL, in ledgers, after an extension (~90 days at
 /// ~5s/ledger).
-pub const INSTANCE_TTL_EXTEND_TO: u32 = 1_555_200;
+pub const INSTANCE_TTL_EXTEND_TO: u32 = compliance_ttl::TTL_EXTEND_TO;
 
 /// Emitted by `evaluate` regardless of the pass/fail outcome so that
 /// off-chain compliance tooling can build a full audit trail even when the

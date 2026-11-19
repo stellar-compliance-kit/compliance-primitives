@@ -11,6 +11,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+compliance-ttl = { workspace = true }
 soroban-sdk = { workspace = true }
 compliance-pausable = { workspace = true }
 

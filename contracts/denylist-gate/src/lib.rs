@@ -72,9 +72,9 @@ pub const MIN_UPGRADE_DELAY_LEDGERS: u32 = 17_280;
 /// Instance-storage TTL policy: whenever the remaining instance TTL drops
 /// below [`INSTANCE_TTL_THRESHOLD`], it is bumped back up to
 /// [`INSTANCE_TTL_EXTEND_TO`]. Matches `compliance-aggregator`.
-pub const INSTANCE_TTL_THRESHOLD: u32 = 120_960; // ~7 days
+pub const INSTANCE_TTL_THRESHOLD: u32 = compliance_ttl::TTL_THRESHOLD; // ~7 days
 /// Target instance TTL after an extension.
-pub const INSTANCE_TTL_EXTEND_TO: u32 = 1_555_200; // ~90 days
+pub const INSTANCE_TTL_EXTEND_TO: u32 = compliance_ttl::TTL_EXTEND_TO; // ~90 days
 
 // ---------------------------------------------------------------------------
 // Storage
@@ -636,14 +636,13 @@ impl DenylistGate {
         Self::reject_if_paused(&env)?;
         Self::require_compliance_authority(&env, &admin)?;
 
-        const MAX_TTL: u32 = 6_311_520;
-        const THRESHOLD: u32 = MAX_TTL / 2;
-
         let key = DataKey::Denied(address.clone());
         env.storage().persistent().set(&key, &true);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, THRESHOLD, MAX_TTL);
+        env.storage().persistent().extend_ttl(
+            &key,
+            compliance_ttl::DENYLIST_ENTRY_TTL_THRESHOLD,
+            compliance_ttl::DENYLIST_ENTRY_TTL_EXTEND_TO,
+        );
 
         DenyAdd {
             address: address.clone(),

@@ -12,6 +12,7 @@ members = [
     "contracts/pausable",
     "contracts/policy-engine",
     "crates/test-trace",
+    "crates/ttl-policy",
     "examples/allowlist-token-usage",
     "examples/circuit-breaker-consumer",
     "examples/circuit-breaker-policy-engine",
@@ -39,6 +40,7 @@ repository = "https://github.com/stellar-compliance-kit/compliance-primitives"
 [workspace.dependencies]
 soroban-sdk = "27.0.0"
 compliance-pausable = { path = "contracts/pausable" }
+compliance-ttl = { path = "crates/ttl-policy" }
 
 [profile.release]
 opt-level = "z"

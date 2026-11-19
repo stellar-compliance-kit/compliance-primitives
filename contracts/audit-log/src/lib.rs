@@ -152,10 +152,10 @@ pub const MAX_DETAIL_LEN: u32 = 256;
 
 /// Extend a persistent log entry when its remaining TTL drops below this many
 /// ledgers (~7 days at ~5s/ledger).
-pub const ENTRY_TTL_THRESHOLD: u32 = 120_960;
+pub const ENTRY_TTL_THRESHOLD: u32 = compliance_ttl::TTL_THRESHOLD;
 /// Target remaining TTL, in ledgers, after an entry is extended (~90 days at
 /// ~5s/ledger).
-pub const ENTRY_TTL_EXTEND_TO: u32 = 1_555_200;
+pub const ENTRY_TTL_EXTEND_TO: u32 = compliance_ttl::TTL_EXTEND_TO;
 
 // ---------------------------------------------------------------------------
 // Storage types

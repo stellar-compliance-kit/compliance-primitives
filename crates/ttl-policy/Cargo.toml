@@ -1,0 +1,11 @@
+[package]
+name = "compliance-ttl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared storage TTL policy constants for the compliance primitives contracts."
+
+# No dependencies: this crate only holds `u32` ledger-count constants so every
+# contract uses the same TTL policy.
+[dependencies]
