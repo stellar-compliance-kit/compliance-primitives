@@ -51,7 +51,10 @@
 //! an issuer-controlled process.
 #![no_std]
 
-use soroban_sdk::{contract, contractclient, contracterror, contractimpl, contracttype, Address, Env, String, Vec};
+use soroban_sdk::{
+    contract, contractclient, contracterror, contractimpl, contracttype, symbol_short, Address,
+    Env, String, Vec,
+};
 
 // ---------------------------------------------------------------------------
 // Mirrored aggregator types
@@ -69,11 +72,16 @@ pub enum CheckKind {
 }
 
 /// Mirror of `compliance_aggregator::CheckResult`.
+///
+/// The aggregator's `CheckResult` carries a `code` field (the reason code for
+/// the check outcome, `0` when the check passed). The field must be mirrored
+/// here with the same name and type so the aggregator's return value decodes.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CheckResult {
     pub check: CheckKind,
     pub passed: bool,
+    pub code: u32,
 }
 
 /// Subset of the `compliance-aggregator` interface this token uses.
@@ -162,8 +170,8 @@ impl RwaAggregatorToken {
             env.storage().instance().get(&DataKey::AllowedCodes).ok_or(Error::NotInitialized)?;
 
         let aggregator = AggregatorClient::new(&env, &aggregator_addr);
-        Self::require_compliant(&aggregator, &from, &allowed_codes)?;
-        Self::require_compliant(&aggregator, &to, &allowed_codes)?;
+        Self::require_compliant(&env, &aggregator, &from, &allowed_codes)?;
+        Self::require_compliant(&env, &aggregator, &to, &allowed_codes)?;
 
         let from_balance = Self::balance(env.clone(), from.clone());
         if from_balance < amount {
@@ -180,6 +188,7 @@ impl RwaAggregatorToken {
     /// naming the first failed gate. Any error from the aggregator call itself
     /// fails closed.
     fn require_compliant(
+        env: &Env,
         aggregator: &AggregatorClient,
         party: &Address,
         allowed_codes: &Vec<String>,
@@ -193,6 +202,12 @@ impl RwaAggregatorToken {
         }
         for result in checks.iter() {
             if !result.passed {
+                // Surface the aggregator's reason code so operators can tell
+                // *why* the gate denied, not just which gate it was.
+                env.events().publish(
+                    (symbol_short!("compliance"), symbol_short!("denied")),
+                    (party.clone(), result.check, result.code),
+                );
                 return Err(match result.check {
                     CheckKind::CircuitBreaker => Error::CircuitBreakerFrozen,
                     CheckKind::Denylist => Error::DeniedByGate,

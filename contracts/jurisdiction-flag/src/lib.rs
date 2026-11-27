@@ -49,9 +49,36 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contracttype, Address, BytesN, Env,
-    String, Vec,
+    contract, contracterror, contractevent, contractimpl, contractmeta, contracttype, Address,
+    BytesN, Env, String, Vec,
 };
+
+// #809: embed crate version and repository URL in the deployed WASM so the
+// release workflow (and anyone inspecting the chain) can tell which release
+// is live.
+contractmeta!(key = "version", val = env!("CARGO_PKG_VERSION"));
+contractmeta!(key = "source", val = env!("CARGO_PKG_REPOSITORY"));
+
+/// Current version of the shared `ComplianceCheck` trait implemented by this
+/// contract (#808). Callers must compare this against the version they were
+/// built against before invoking `is_compliant`.
+pub const COMPLIANCE_CHECK_INTERFACE_VERSION: u32 = 2;
+
+/// Reason code returned by `is_compliant` when the address has at least one
+/// active jurisdiction code.
+pub const CHECK_CODE_OK: u32 = 0;
+/// Reason code returned by `is_compliant` when the address has no active
+/// jurisdiction code (never flagged, or its flag expired).
+pub const CHECK_CODE_NO_JURISDICTION: u32 = 1;
+
+/// Result of a shared `ComplianceCheck` check (#807): whether the address is
+/// allowed, plus a reason code explaining the outcome.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckResult {
+    pub allowed: bool,
+    pub code: u32,
+}
 
 /// Length in bytes of an ISO 3166-1 alpha-2 code.
 const JURISDICTION_CODE_LEN: u32 = 2;
@@ -942,22 +969,47 @@ impl JurisdictionFlag {
             .unwrap_or(JurisdictionMode::AllowList)
     }
 
-    /// Unified compliance check — returns `true` if `address` has **any**
-    /// jurisdiction code set, i.e. it has been through an onboarding/KYC
-    /// process that assigned it a jurisdiction.
+    /// Version of the shared `ComplianceCheck` trait implemented here (#808).
+    ///
+    /// Callers must verify this matches the interface version they were built
+    /// against before calling [`is_compliant`](Self::is_compliant); a mismatch
+    /// means the return type or reason codes may have changed.
+    pub fn interface_version(_env: Env) -> u32 {
+        COMPLIANCE_CHECK_INTERFACE_VERSION
+    }
+
+    /// Unified compliance check — returns a [`CheckResult`] whose `allowed`
+    /// is `true` if `address` has **any** jurisdiction code set, i.e. it has
+    /// been through an onboarding/KYC process that assigned it a jurisdiction.
     ///
     /// This entry point implements the shared `ComplianceCheck` interface
-    /// (`is_compliant(address) -> bool`).  Unlike [`is_permitted_jurisdiction`],
-    /// it does not validate the code against a permitted-jurisdictions list
-    /// because the `ComplianceCheck` interface carries only `address`.
+    /// (`is_compliant(address) -> CheckResult`).  Unlike
+    /// [`is_permitted_jurisdiction`], it does not validate the code against a
+    /// permitted-jurisdictions list because the `ComplianceCheck` interface
+    /// carries only `address`.
+    ///
+    /// Reason codes (#807):
+    /// - [`CHECK_CODE_OK`] (`0`): a jurisdiction code is set; `allowed` is `true`.
+    /// - [`CHECK_CODE_NO_JURISDICTION`] (`1`): no active jurisdiction code
+    ///   (never flagged, or the flag expired); `allowed` is `false`.
     ///
     /// Use [`is_permitted_jurisdiction`] when you need to enforce a specific
     /// set of allowed codes.  Use `is_compliant` for the lighter check of
     /// "has this address been assigned a jurisdiction at all".
     ///
     /// Not affected by pause state — reads always succeed.
-    pub fn is_compliant(env: Env, address: Address) -> bool {
-        Self::get_jurisdiction(env, address).is_some()
+    pub fn is_compliant(env: Env, address: Address) -> CheckResult {
+        if Self::get_jurisdiction(env, address).is_some() {
+            CheckResult {
+                allowed: true,
+                code: CHECK_CODE_OK,
+            }
+        } else {
+            CheckResult {
+                allowed: false,
+                code: CHECK_CODE_NO_JURISDICTION,
+            }
+        }
     }
 
     // -----------------------------------------------------------------------

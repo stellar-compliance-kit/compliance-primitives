@@ -52,15 +52,32 @@ use soroban_sdk::{contractclient, contracterror, symbol_short, Address, Env, Sym
 pub enum FlowError {
     /// The circuit breaker is frozen; no transfer may proceed.
     CircuitBreakerFrozen = 1,
+    /// The policy engine implements an incompatible interface version.
+    IncompatibleInterfaceVersion = 2,
 }
 
 // ---------------------------------------------------------------------------
 // Minimal cross-contract client interfaces for the composed contracts.
 // ---------------------------------------------------------------------------
 
+/// Result of a compliance check: whether the action is allowed, plus a
+/// reason code explaining the verdict (see #807).
+#[soroban_sdk::contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckResult {
+    pub allowed: bool,
+    pub code: u32,
+}
+
+/// Interface version this example is compiled against. Callers must verify
+/// `interface_version()` matches before invoking compliance checks (#808).
+pub const COMPLIANCE_INTERFACE_VERSION: u32 = 2;
+
 #[contractclient(name = "PolicyEngineClient")]
 pub trait PolicyEngineInterface {
-    fn evaluate(env: Env, from: Address, to: Address) -> bool;
+    /// Returns the interface version implemented by the deployed contract.
+    fn interface_version(env: Env) -> u32;
+    fn evaluate(env: Env, from: Address, to: Address) -> CheckResult;
 }
 
 #[contractclient(name = "CircuitBreakerClient")]
@@ -102,11 +119,24 @@ pub fn execute_transfer(
     }
 
     let policy = PolicyEngineClient::new(env, policy_engine);
-    let passed = policy.evaluate(from, to);
+
+    // Verify the deployed implementer speaks the interface version we expect
+    // before calling into it (#808).
+    if policy.interface_version() != COMPLIANCE_INTERFACE_VERSION {
+        audit.record(
+            audit_source,
+            &symbol_short!("halted"),
+            from,
+            &soroban_sdk::String::from_str(env, "incompatible interface version"),
+        );
+        return Err(FlowError::IncompatibleInterfaceVersion);
+    }
+
+    let result = policy.evaluate(from, to);
 
     audit.record(
         audit_source,
-        if passed {
+        if result.allowed {
             &symbol_short!("allowed")
         } else {
             &symbol_short!("blocked")
@@ -115,7 +145,7 @@ pub fn execute_transfer(
         &soroban_sdk::String::from_str(env, "policy evaluation"),
     );
 
-    Ok(passed)
+    Ok(result.allowed)
 }
 
 #[cfg(test)]

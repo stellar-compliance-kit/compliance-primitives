@@ -41,8 +41,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "circuit_breaker_guardian_sequences"
-path = "fuzz_targets/circuit_breaker_guardian_sequences.rs"
+name = "jurisdiction_validate_code"
+path = "fuzz_targets/jurisdiction_validate_code.rs"
 test = false
 doc = false
 bench = false

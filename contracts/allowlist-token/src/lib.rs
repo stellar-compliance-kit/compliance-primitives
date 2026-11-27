@@ -72,9 +72,12 @@
 extern crate alloc;
 
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contracttype, token, Address, Bytes,
-    BytesN, Env, String, Symbol, Vec,
+    contract, contracterror, contractevent, contractimpl, contractmeta, contracttype, token,
+    Address, Bytes, BytesN, Env, String, Symbol, Vec,
 };
+
+contractmeta!(key = "version", val = env!("CARGO_PKG_VERSION"));
+contractmeta!(key = "source", val = env!("CARGO_PKG_REPOSITORY"));
 
 /// Extend a persistent allowlist entry when its remaining TTL drops below
 /// this many ledgers (~7 days at ~5s/ledger on mainnet).
@@ -330,6 +333,34 @@ pub struct UpgradeState {
 
 /// Current on-chain schema version for this contract instance.
 pub const SCHEMA_VERSION: u32 = 1;
+
+/// Version of the shared `ComplianceCheck` interface implemented by
+/// [`AllowlistToken::is_compliant`]. Bumped whenever the interface's
+/// signature or semantics change; callers must compare this against the
+/// version they were built against before calling `is_compliant`.
+pub const COMPLIANCE_CHECK_INTERFACE_VERSION: u32 = 2;
+
+/// Reason code returned by [`AllowlistToken::is_compliant`] when the address
+/// is on the allowlist.
+pub const CHECK_CODE_ALLOWED: u32 = 0;
+/// Reason code returned by [`AllowlistToken::is_compliant`] when the address
+/// has no allowlist entry.
+pub const CHECK_CODE_NOT_ALLOWLISTED: u32 = 1;
+/// Reason code returned by [`AllowlistToken::is_compliant`] when the address
+/// has an allowlist entry whose `expiration_ledger` has passed.
+pub const CHECK_CODE_ALLOWLIST_ENTRY_EXPIRED: u32 = 2;
+
+/// Result of the shared `ComplianceCheck` interface.
+///
+/// `allowed` is the pass/fail verdict; `code` explains it. A `code` of
+/// [`CHECK_CODE_ALLOWED`] (0) always accompanies `allowed == true`; any
+/// non-zero `code` accompanies `allowed == false`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckResult {
+    pub allowed: bool,
+    pub code: u32,
+}
 
 /// Minimum upgrade review window, approximately one day at five seconds per ledger.
 pub const MIN_UPGRADE_DELAY_LEDGERS: u32 = 17_280;
@@ -1182,16 +1213,61 @@ impl AllowlistToken {
         Ok(true)
     }
 
-    /// Unified compliance check — returns `true` if `address` is on the
-    /// allowlist, identical to calling [`is_allowed`].
+    /// Version of the shared `ComplianceCheck` interface implemented by this
+    /// contract. Callers should read this once and refuse to call
+    /// `is_compliant` if it does not match the version they were built
+    /// against (see [`COMPLIANCE_CHECK_INTERFACE_VERSION`]).
+    pub fn interface_version(_env: Env) -> u32 {
+        COMPLIANCE_CHECK_INTERFACE_VERSION
+    }
+
+    /// Unified compliance check — returns a [`CheckResult`] describing
+    /// whether `address` may transact and, if not, why.
     ///
     /// This entry point implements the shared `ComplianceCheck` interface
-    /// (`is_compliant(address) -> bool`) so external contracts can call any
-    /// of the three compliance primitives through the same pattern.
+    /// (`is_compliant(address) -> CheckResult`) so external contracts can call
+    /// any of the three compliance primitives through the same pattern.
+    ///
+    /// Reason codes:
+    /// - [`CHECK_CODE_ALLOWED`] (0): `address` is on the allowlist.
+    /// - [`CHECK_CODE_NOT_ALLOWLISTED`] (1): `address` has no allowlist entry.
+    /// - [`CHECK_CODE_ALLOWLIST_ENTRY_EXPIRED`] (2): `address` has an
+    ///   allowlist entry, but its `expiration_ledger` has passed.
     ///
     /// Not affected by pause state — reads always succeed.
-    pub fn is_compliant(env: Env, address: Address) -> bool {
-        Self::is_allowed(env, address)
+    pub fn is_compliant(env: Env, address: Address) -> CheckResult {
+        Self::extend_instance_ttl(&env);
+        match env
+            .storage()
+            .persistent()
+            .get::<DataKey, AllowlistEntry>(&DataKey::Allowed(address))
+        {
+            None => CheckResult {
+                allowed: false,
+                code: CHECK_CODE_NOT_ALLOWLISTED,
+            },
+            Some(AllowlistEntry {
+                expiration_ledger: None,
+            }) => CheckResult {
+                allowed: true,
+                code: CHECK_CODE_ALLOWED,
+            },
+            Some(AllowlistEntry {
+                expiration_ledger: Some(exp),
+            }) => {
+                if env.ledger().sequence() <= exp {
+                    CheckResult {
+                        allowed: true,
+                        code: CHECK_CODE_ALLOWED,
+                    }
+                } else {
+                    CheckResult {
+                        allowed: false,
+                        code: CHECK_CODE_ALLOWLIST_ENTRY_EXPIRED,
+                    }
+                }
+            }
+        }
     }
 
     /// Pause all mutating operations. Admin-only.

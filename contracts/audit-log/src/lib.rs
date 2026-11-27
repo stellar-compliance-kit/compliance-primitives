@@ -134,9 +134,13 @@
 #![no_std]
 
 use soroban_sdk::{
+    contractmeta,
     contract, contractclient, contracterror, contractevent, contractimpl, contracttype, Address,
     Bytes, BytesN, Env, String, Symbol, Vec,
 };
+
+contractmeta!(key = "version", val = env!("CARGO_PKG_VERSION"));
+contractmeta!(key = "source", val = env!("CARGO_PKG_REPOSITORY"));
 
 /// Maximum number of entries `list_entries` will return in a single call.
 /// Bounds the resources consumed by a single invocation regardless of how

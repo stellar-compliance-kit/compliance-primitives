@@ -34,6 +34,36 @@ use allowlist_token::{AllowlistToken, AllowlistTokenClient};
 use denylist_gate::{DenylistGate, DenylistGateClient};
 use jurisdiction_flag::{JurisdictionFlag, JurisdictionFlagClient};
 
+use compliance_check::{
+    CheckResult, ComplianceCheck, CODE_ALLOWED, CODE_DENIED, CODE_NO_JURISDICTION,
+    CODE_NOT_ALLOWLISTED, INTERFACE_VERSION,
+};
+
+// ---------------------------------------------------------------------------
+// Caller-side compatibility check (mirrors what aggregators/wallets must do)
+// ---------------------------------------------------------------------------
+
+/// Returns `true` when `version` is compatible with the caller's expected
+/// `INTERFACE_VERSION`.  Callers MUST run this before invoking
+/// `is_compliant` so that a silently-changed trait cannot be misused.
+fn is_compatible(version: u32) -> bool {
+    version == INTERFACE_VERSION
+}
+
+/// Assert that `client` reports the current `INTERFACE_VERSION` and that the
+/// caller-side compatibility check accepts it.
+fn assert_interface_compatible(client: &impl ComplianceCheck) {
+    let version = client.interface_version();
+    assert_eq!(
+        version, INTERFACE_VERSION,
+        "implementer reports an unexpected interface version"
+    );
+    assert!(
+        is_compatible(version),
+        "caller-side compatibility check rejected a matching version"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Generic helpers — the whole point of ComplianceCheck is enabling these
 // ---------------------------------------------------------------------------
@@ -43,44 +73,74 @@ use jurisdiction_flag::{JurisdictionFlag, JurisdictionFlagClient};
 /// This function is generic over anything that has an `is_compliant` method
 /// matching the `ComplianceCheck` contract interface shape.
 fn assert_compliant_allowlist(client: &AllowlistTokenClient, address: &Address) {
+    let result: CheckResult = client.is_compliant(address);
     assert!(
-        client.is_compliant(address),
-        "expected is_compliant to return true for allowlist-token"
+        result.allowed,
+        "expected is_compliant to allow for allowlist-token"
+    );
+    assert_eq!(
+        result.code, CODE_ALLOWED,
+        "expected CODE_ALLOWED for an allowlisted address"
     );
 }
 
 fn assert_not_compliant_allowlist(client: &AllowlistTokenClient, address: &Address) {
+    let result: CheckResult = client.is_compliant(address);
     assert!(
-        !client.is_compliant(address),
-        "expected is_compliant to return false for allowlist-token"
+        !result.allowed,
+        "expected is_compliant to deny for allowlist-token"
+    );
+    assert_eq!(
+        result.code, CODE_NOT_ALLOWLISTED,
+        "expected CODE_NOT_ALLOWLISTED for a non-allowlisted address"
     );
 }
 
 fn assert_compliant_denylist(client: &DenylistGateClient, address: &Address) {
+    let result: CheckResult = client.is_compliant(address);
     assert!(
-        client.is_compliant(address),
-        "expected is_compliant to return true for denylist-gate"
+        result.allowed,
+        "expected is_compliant to allow for denylist-gate"
+    );
+    assert_eq!(
+        result.code, CODE_ALLOWED,
+        "expected CODE_ALLOWED for a non-denied address"
     );
 }
 
 fn assert_not_compliant_denylist(client: &DenylistGateClient, address: &Address) {
+    let result: CheckResult = client.is_compliant(address);
     assert!(
-        !client.is_compliant(address),
-        "expected is_compliant to return false for denylist-gate"
+        !result.allowed,
+        "expected is_compliant to deny for denylist-gate"
+    );
+    assert_eq!(
+        result.code, CODE_DENIED,
+        "expected CODE_DENIED for a denylisted address"
     );
 }
 
 fn assert_compliant_jurisdiction(client: &JurisdictionFlagClient, address: &Address) {
+    let result: CheckResult = client.is_compliant(address);
     assert!(
-        client.is_compliant(address),
-        "expected is_compliant to return true for jurisdiction-flag"
+        result.allowed,
+        "expected is_compliant to allow for jurisdiction-flag"
+    );
+    assert_eq!(
+        result.code, CODE_ALLOWED,
+        "expected CODE_ALLOWED for a permitted jurisdiction"
     );
 }
 
 fn assert_not_compliant_jurisdiction(client: &JurisdictionFlagClient, address: &Address) {
+    let result: CheckResult = client.is_compliant(address);
     assert!(
-        !client.is_compliant(address),
-        "expected is_compliant to return false for jurisdiction-flag"
+        !result.allowed,
+        "expected is_compliant to deny for jurisdiction-flag"
+    );
+    assert_eq!(
+        result.code, CODE_NO_JURISDICTION,
+        "expected CODE_NO_JURISDICTION when no jurisdiction is set"
     );
 }
 
@@ -303,20 +363,53 @@ fn test_all_three_contracts_implement_is_compliant_polymorphically() {
     s.jurisdiction.set_jurisdiction(&s.issuer, &alice, &us_code);
     // denylist: alice is not denied by default
 
-    // All three must return true for alice via is_compliant
-    assert!(s.allowlist.is_compliant(&alice));
-    assert!(s.denylist.is_compliant(&alice));
-    assert!(s.jurisdiction.is_compliant(&alice));
+    // All three must allow alice via is_compliant
+    assert!(s.allowlist.is_compliant(&alice).allowed);
+    assert!(s.denylist.is_compliant(&alice).allowed);
+    assert!(s.jurisdiction.is_compliant(&alice).allowed);
 
     let bob = Address::generate(&env);
     // bob is not on allowlist, is not denied, has no jurisdiction
 
     // allowlist: bob fails (not listed)
-    assert!(!s.allowlist.is_compliant(&bob));
+    let allowlist_result = s.allowlist.is_compliant(&bob);
+    assert!(!allowlist_result.allowed);
+    assert_eq!(allowlist_result.code, CODE_NOT_ALLOWLISTED);
     // denylist: bob passes (not denied)
-    assert!(s.denylist.is_compliant(&bob));
+    let denylist_result = s.denylist.is_compliant(&bob);
+    assert!(denylist_result.allowed);
+    assert_eq!(denylist_result.code, CODE_ALLOWED);
     // jurisdiction: bob fails (no code set)
-    assert!(!s.jurisdiction.is_compliant(&bob));
+    let jurisdiction_result = s.jurisdiction.is_compliant(&bob);
+    assert!(!jurisdiction_result.allowed);
+    assert_eq!(jurisdiction_result.code, CODE_NO_JURISDICTION);
+}
+
+// ---------------------------------------------------------------------------
+// Interface versioning: implementers report INTERFACE_VERSION, callers verify
+// ---------------------------------------------------------------------------
+
+/// Every implementing contract must report `INTERFACE_VERSION` from
+/// `interface_version()`, and the caller-side compatibility check must accept
+/// it.
+#[test]
+fn test_all_implementers_report_interface_version() {
+    let env = Env::default();
+    let s = setup(&env);
+
+    assert_interface_compatible(&s.allowlist);
+    assert_interface_compatible(&s.denylist);
+    assert_interface_compatible(&s.jurisdiction);
+}
+
+/// A caller-side compatibility check must reject versions that do not match
+/// the expected `INTERFACE_VERSION`, so mismatched implementers are never
+/// called.
+#[test]
+fn test_caller_rejects_mismatched_interface_version() {
+    assert!(is_compatible(INTERFACE_VERSION));
+    assert!(!is_compatible(INTERFACE_VERSION.wrapping_add(1)));
+    assert!(!is_compatible(INTERFACE_VERSION.wrapping_sub(1)));
 }
 
 // ---------------------------------------------------------------------------

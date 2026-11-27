@@ -132,10 +132,15 @@
 
 use soroban_sdk::{
     auth::{Context, CustomAccountInterface},
-    contract, contracterror, contractevent, contractimpl, contracttype,
+    contract, contracterror, contractevent, contractimpl, contractmeta, contracttype,
     crypto::Hash,
     Address, BytesN, Env, Vec,
 };
+
+// Embed crate version and repository URL in the deployed WASM so operators
+// can identify which release is live on-chain.
+contractmeta!(key = "version", val = env!("CARGO_PKG_VERSION"));
+contractmeta!(key = "source", val = env!("CARGO_PKG_REPOSITORY"));
 
 // ---------------------------------------------------------------------------
 // Events

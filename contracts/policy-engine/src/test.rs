@@ -3,6 +3,7 @@ use crate::test_utils::{
     MockCircuitBreaker, MockCircuitBreakerClient, MockDenylist, MockDenylistClient,
     MockJurisdiction, MockJurisdictionClient,
 };
+use compliance_check::{CheckResult, ComplianceCheckClient, COMPLIANCE_CHECK_INTERFACE_VERSION};
 use circuit_breaker::{CircuitBreaker, CircuitBreakerClient as CbClient};
 use denylist_gate::{DenylistGate, DenylistGateClient};
 use jurisdiction_flag::{JurisdictionFlag, JurisdictionFlagClient};
@@ -756,6 +757,137 @@ fn test_is_paused_returns_current_state() {
 
     env.as_contract(&engine_id, || compliance_pausable::pause(&env));
     assert!(client.is_paused());
+}
+
+// ---------------------------------------------------------------------------
+// Tests for issues #807 / #808: CheckResult reason codes and interface version
+// ---------------------------------------------------------------------------
+
+/// The mock implementers advertise the current interface version, and the
+/// engine accepts them.
+#[test]
+fn test_mocks_report_current_interface_version() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let deny_id = setup_denylist(&env);
+    let juri_id = setup_jurisdiction(&env);
+    let cb_id = setup_circuit_breaker(&env);
+
+    assert_eq!(
+        ComplianceCheckClient::new(&env, &deny_id).interface_version(),
+        COMPLIANCE_CHECK_INTERFACE_VERSION
+    );
+    assert_eq!(
+        ComplianceCheckClient::new(&env, &juri_id).interface_version(),
+        COMPLIANCE_CHECK_INTERFACE_VERSION
+    );
+    assert_eq!(
+        ComplianceCheckClient::new(&env, &cb_id).interface_version(),
+        COMPLIANCE_CHECK_INTERFACE_VERSION
+    );
+}
+
+/// Mocks return a `CheckResult` carrying both the verdict and a reason code.
+#[test]
+fn test_mock_returns_check_result_with_reason_code() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let deny_id = setup_denylist(&env);
+    let from = Address::generate(&env);
+    let to = Address::generate(&env);
+
+    let deny_client = MockDenylistClient::new(&env, &deny_id);
+
+    // Clear addresses: allowed with the OK reason code.
+    let ok = deny_client.check(&from, &to);
+    assert!(ok.allowed);
+    assert_eq!(ok.code, REASON_OK);
+
+    // Denied address: not allowed with the DENYLISTED reason code.
+    deny_client.add_to_denylist(&from);
+    let denied = deny_client.check(&from, &to);
+    assert!(!denied.allowed);
+    assert_eq!(denied.code, REASON_DENYLISTED);
+}
+
+/// The engine rejects an implementer whose interface version is incompatible
+/// instead of silently calling into it.
+#[test]
+fn test_engine_rejects_incompatible_interface_version() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let deny_id = setup_denylist(&env);
+    let from = Address::generate(&env);
+    let to = Address::generate(&env);
+
+    // Force the mock to report an incompatible version.
+    MockDenylistClient::new(&env, &deny_id)
+        .set_interface_version(&(COMPLIANCE_CHECK_INTERFACE_VERSION + 1));
+
+    let (admin, _engine_id, client) = setup_engine_all(&env);
+    client.add_check(
+        &admin,
+        &CheckKind::Denylist(DenylistCheck {
+            contract: deny_id.clone(),
+        }),
+    );
+
+    let result = client.try_evaluate(&from, &to);
+    assert_eq!(result, Err(Ok(Error::IncompatibleInterfaceVersion)));
+}
+
+/// A denial surfaces the implementer's reason code through `evaluate_verbose`.
+#[test]
+fn test_evaluate_verbose_surfaces_reason_code() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let deny_id = setup_denylist(&env);
+    let from = Address::generate(&env);
+    let to = Address::generate(&env);
+
+    MockDenylistClient::new(&env, &deny_id).add_to_denylist(&from);
+
+    let (admin, _engine_id, client) = setup_engine_all(&env);
+    client.add_check(
+        &admin,
+        &CheckKind::Denylist(DenylistCheck {
+            contract: deny_id.clone(),
+        }),
+    );
+
+    let (passed, failure) = client.evaluate_verbose(&from, &to);
+    assert!(!passed, "expected policy to fail");
+    let f = failure.expect("expected Some(CheckFailure) when policy fails");
+    assert_eq!(f.check_index, 0);
+    assert_eq!(f.kind, soroban_sdk::Symbol::new(&env, "Denylist"));
+    assert_eq!(f.code, REASON_DENYLISTED);
+}
+
+/// A passing policy reports the OK reason code.
+#[test]
+fn test_evaluate_verbose_pass_reports_ok_reason_code() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let deny_id = setup_denylist(&env);
+    let from = Address::generate(&env);
+    let to = Address::generate(&env);
+
+    let (admin, _engine_id, client) = setup_engine_all(&env);
+    client.add_check(
+        &admin,
+        &CheckKind::Denylist(DenylistCheck {
+            contract: deny_id.clone(),
+        }),
+    );
+
+    let (passed, failure) = client.evaluate_verbose(&from, &to);
+    assert!(passed, "expected policy to pass");
+    assert!(failure.is_none(), "expected no CheckFailure when policy passes");
 }
 
 // ---------------------------------------------------------------------------

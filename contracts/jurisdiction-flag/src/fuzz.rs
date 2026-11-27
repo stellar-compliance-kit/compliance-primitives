@@ -134,6 +134,81 @@ fn fuzz_jurisdiction_set_get_sequences() {
     }
 }
 
+/// Fuzz `validate_jurisdiction_code` with arbitrary byte-derived strings.
+///
+/// Mirrors the `cargo-fuzz` target `fuzz_validate_jurisdiction_code`: the
+/// validator must never panic and must accept a string iff it is exactly two
+/// uppercase ASCII letters (`A`..=`Z`).
+#[test]
+fn fuzz_validate_jurisdiction_code_bytes() {
+    let iterations: u32 = std::env::var("FUZZ_ITERATIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(256);
+
+    // Interesting fixed inputs: empty, lowercase, mixed, non-ASCII, overlong.
+    let fixed: [&str; 10] = [
+        "",
+        "U",
+        "US",
+        "us",
+        "Us",
+        "USA",
+        "U1",
+        "1S",
+        "ÜS",
+        "🇺🇸",
+    ];
+
+    for input in fixed {
+        check_validate_oracle(input);
+    }
+
+    for seed in 1..=iterations {
+        let mut rng = seed;
+        // Bias length toward the interesting 0..=4 range, occasionally longer.
+        let len = match next_u32(&mut rng) % 8 {
+            0 => 0,
+            1 => 1,
+            2..=4 => 2,
+            5 => 3,
+            6 => 4,
+            _ => next_usize(&mut rng, 16),
+        };
+        let mut bytes = std::vec::Vec::with_capacity(len);
+        for _ in 0..len {
+            // Mix printable ASCII, uppercase, lowercase, and arbitrary bytes.
+            let b = match next_u32(&mut rng) % 4 {
+                0 => b'A' + (next_u32(&mut rng) % 26) as u8,
+                1 => b'a' + (next_u32(&mut rng) % 26) as u8,
+                2 => (next_u32(&mut rng) % 128) as u8,
+                _ => (next_u32(&mut rng) % 256) as u8,
+            };
+            bytes.push(b);
+        }
+        // Only feed valid UTF-8; invalid sequences are covered by the
+        // cargo-fuzz target which operates on raw bytes.
+        if let Ok(s) = std::str::from_utf8(&bytes) {
+            check_validate_oracle(s);
+        }
+    }
+}
+
+fn check_validate_oracle(input: &str) {
+    let env = Env::default();
+    let s = String::from_str(&env, input);
+    let got = validate_jurisdiction_code(&s);
+
+    let expected = {
+        let bytes = input.as_bytes();
+        bytes.len() == 2 && bytes.iter().all(|b| b.is_ascii_uppercase())
+    };
+    assert_eq!(
+        got, expected,
+        "validate_jurisdiction_code({input:?}) = {got}, expected {expected}"
+    );
+}
+
 #[test]
 fn fuzz_jurisdiction_multicode_add_remove_sequences() {
     let iterations: u32 = std::env::var("FUZZ_ITERATIONS")

@@ -78,13 +78,12 @@
 //! alongside it and call it after `upgrade`. See `STORAGE_VERSIONING.md`.
 
 use soroban_sdk::{
-    contract, contractclient, contracterror, contractevent, contractimpl, contracttype, Address, BytesN, Env, String,
-    Symbol, Vec,
+    contract, contracterror, contractevent, contractimpl, contractmeta, contracttype, Address, Env,
+    String, Vec,
 };
 
-/// Maximum number of guardians that may be configured. Bounds the cost of
-/// `remove_guardian` and `is_guardian`, which iterate the guardian list.
-pub const MAX_GUARDIANS: u32 = 10;
+contractmeta!(key = "version", val = env!("CARGO_PKG_VERSION"));
+contractmeta!(key = "source", val = env!("CARGO_PKG_REPOSITORY"));
 
 /// Extend the contract's instance storage when its remaining TTL drops below
 /// this many ledgers (~7 days at ~5s/ledger).

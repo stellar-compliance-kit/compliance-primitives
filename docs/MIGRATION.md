@@ -737,6 +737,151 @@ backfill for those addresses.
 
 ---
 
+## Migrating to the versioned `ComplianceCheck` trait
+
+**Who this section is for:** you implement the shared `ComplianceCheck`
+trait (for example inside your own token, or in a custom gate contract), or
+you call a contract that implements it.  The trait used to return a bare
+`bool` and had no version marker; both changed.  If you skip this section,
+your deployed implementers will keep compiling against the old shape and
+callers will misinterpret their results.
+
+### What changed
+
+| Before | After |
+|---|---|
+| `fn check(env: Env, address: Address) -> bool` | `fn check(env: Env, address: Address) -> CheckResult` |
+| Pass/fail only — no reason | `CheckResult { allowed: bool, code: ReasonCode }` |
+| No version marker on the trait | `fn interface_version(env: Env) -> u32` (required) |
+| Callers assumed the shape | Callers must verify compatibility before calling |
+
+The interface version is bumped to **`2`**.  Version `1` is the old
+`bool`-returning trait with no `interface_version()` method.
+
+### The new result type
+
+```rust
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckResult {
+    /// `true` when the address passes this check.
+    pub allowed: bool,
+    /// Why the check produced this result.  `Allowed` when `allowed` is
+    /// `true`; a specific rejection reason otherwise.
+    pub code: ReasonCode,
+}
+```
+
+`allowed` keeps the old pass/fail semantics, so `result.allowed` is a
+drop-in replacement for the old `bool` return value.  `code` is additive:
+aggregators (`policy-engine`) and wallets can now surface *why* a transfer
+was rejected instead of a single opaque failure.
+
+### Reason codes
+
+`ReasonCode` is a stable, append-only enum.  Existing discriminants never
+change meaning; new codes are only ever added at the end.  Treat any code
+you do not recognise as a generic rejection (do not treat it as `Allowed`).
+
+| Code | Meaning |
+|---|---|
+| `Allowed` | The address passed the check. |
+| `NotAllowlisted` | Address is not on the allowlist. |
+| `Denylisted` | Address is on the denylist (sanctioned/blocked). |
+| `JurisdictionNotPermitted` | Address's jurisdiction is not in the permitted set. |
+| `JurisdictionUnknown` | No jurisdiction is recorded for the address. |
+| `Expired` | The address's allowlist entry has expired. |
+| `NotInitialized` | The implementing contract has not been initialized. |
+
+When `allowed` is `true`, `code` is always `Allowed`.  When `allowed` is
+`false`, `code` is never `Allowed`.
+
+### Implementing the new trait
+
+Add the required `interface_version()` method and return a `CheckResult`
+from `check`:
+
+```rust
+use soroban_sdk::{contractimpl, Address, Env};
+use compliance_primitives::{CheckResult, ReasonCode};
+
+#[contractimpl]
+impl ComplianceCheck for MyGate {
+    fn interface_version(_env: Env) -> u32 {
+        compliance_primitives::COMPLIANCE_CHECK_INTERFACE_VERSION // == 2
+    }
+
+    fn check(env: Env, address: Address) -> CheckResult {
+        if !Self::is_initialized(&env) {
+            return CheckResult { allowed: false, code: ReasonCode::NotInitialized };
+        }
+        if Self::is_denylisted(&env, &address) {
+            return CheckResult { allowed: false, code: ReasonCode::Denylisted };
+        }
+        CheckResult { allowed: true, code: ReasonCode::Allowed }
+    }
+}
+```
+
+Return the constant rather than a hardcoded literal so a future bump is a
+single-line change.
+
+### Callers: verify compatibility before calling
+
+Because a deployed implementer may still expose the version-1 `bool`
+interface, callers must check `interface_version()` first and refuse to
+call an incompatible contract.  Do this once at wiring time (and again on
+any admin update of the stored contract address), not on every transfer:
+
+```rust
+#[contractclient(name = "ComplianceCheckClient")]
+pub trait ComplianceCheckInterface {
+    fn interface_version(env: Env) -> u32;
+    fn check(env: Env, address: Address) -> CheckResult;
+}
+
+const SUPPORTED_INTERFACE_VERSION: u32 = 2;
+
+fn verify_compliance_contract(env: &Env, addr: &Address) -> Result<(), Error> {
+    let client = ComplianceCheckClient::new(env, addr);
+    if client.interface_version() != SUPPORTED_INTERFACE_VERSION {
+        return Err(Error::IncompatibleComplianceInterface);
+    }
+    Ok(())
+}
+```
+
+Then consume the result:
+
+```rust
+let result = client.check(&address);
+if !result.allowed {
+    // `result.code` tells you (and your logs/events) why.
+    return Err(Error::DeniedByCompliance);
+}
+```
+
+> **Do not** call `check()` on a contract whose `interface_version()` you
+> have not verified.  A version-1 implementer has no
+> `interface_version()` method at all, so the verification call itself will
+> fail — treat that failure as "incompatible" and fall back to your
+> previous integration until the implementer is upgraded.
+
+### Migration checklist
+
+1. Update every `ComplianceCheck` implementer to return `CheckResult` and
+   add `interface_version()` returning `2`.
+2. Redeploy the implementers (the trait shape changed, so this is a new
+   contract deployment, not an in-place upgrade).
+3. Update every caller to verify `interface_version() == 2` before calling
+   `check()`, and to read `result.allowed` / `result.code`.
+4. Update off-chain tooling that consumed the old `bool` to read
+   `result.allowed`, and log `result.code` for rejection diagnostics.
+5. Re-run `cargo test --workspace` — the trait's tests cover both the
+   result shape and the version check.
+
+---
+
 ## Testing your migration
 
 Before touching mainnet:

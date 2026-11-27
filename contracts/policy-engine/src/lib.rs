@@ -95,21 +95,59 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractclient, contracterror, contractevent, contractimpl, contracttype,
-    Address, BytesN, Env, Map, String, Symbol, Vec,
+    contract, contractclient, contracterror, contractevent, contractimpl, contractmeta,
+    contracttype, Address, BytesN, Env, String, Symbol, Vec,
 };
+
+// ---------------------------------------------------------------------------
+// Contract metadata
+// ---------------------------------------------------------------------------
+
+// Carries the crate version and repository URL in the deployed WASM so
+// operators can tell which release is deployed. Kept in sync with
+// `Cargo.toml`; the release workflow verifies both keys are present.
+contractmeta!(key = "version", val = env!("CARGO_PKG_VERSION"));
+contractmeta!(key = "source", val = "https://github.com/example/stellar-compliance");
 
 // ---------------------------------------------------------------------------
 // Cross-contract client interfaces
 // ---------------------------------------------------------------------------
 
+/// The interface version this contract expects from every compliance check
+/// it calls. Bump this (and the shared trait's version) whenever the check
+/// interface changes shape; `evaluate` refuses to call a check whose
+/// `interface_version()` does not match.
+pub const CHECK_INTERFACE_VERSION: u32 = 1;
+
+/// Result returned by a versioned compliance check.
+///
+/// `allowed` is the pass/fail decision; `code` is a machine-readable reason
+/// code (e.g. `"OK"`, `"DENYLISTED"`, `"BAD_JURISDICTION"`) so aggregators
+/// and wallets can surface *why* a policy denied instead of an opaque bool.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckResult {
+    pub allowed: bool,
+    pub code: Symbol,
+}
+
 /// Describes the `denylist-gate` contract interface used for cross-contract
 /// calls. The generated `DenylistCheckClient` is used in `evaluate` to call
 /// `check()` on a deployed denylist-gate instance. We do not take a direct
 /// crate dependency on `denylist-gate` to avoid colliding wasm exports.
+///
+/// ## Migration note
+///
+/// The trait is versioned: every implementer must expose
+/// `interface_version()` returning [`CHECK_INTERFACE_VERSION`], and `check`
+/// now returns a [`CheckResult`] carrying a reason code. `evaluate` verifies
+/// the version before calling `check`; implementers that predate the
+/// versioned interface will fail the compatibility check rather than being
+/// called with an incompatible signature.
 #[contractclient(name = "DenylistCheckClient")]
 pub trait DenylistCheckInterface {
-    fn check(env: Env, address: Address) -> bool;
+    fn interface_version(env: Env) -> u32;
+    fn check(env: Env, address: Address) -> CheckResult;
 }
 
 /// Describes the `jurisdiction-flag` contract interface used for
@@ -117,13 +155,19 @@ pub trait DenylistCheckInterface {
 /// `evaluate`. Same reason as above for avoiding a direct crate dep.
 #[contractclient(name = "JurisdictionCheckClient")]
 pub trait JurisdictionCheckInterface {
-    fn is_permitted_jurisdiction(env: Env, address: Address, allowed_codes: Vec<String>) -> bool;
+    fn interface_version(env: Env) -> u32;
+    fn is_permitted_jurisdiction(
+        env: Env,
+        address: Address,
+        allowed_codes: Vec<String>,
+    ) -> CheckResult;
 }
 
 /// Describes the `circuit-breaker` contract interface used for cross-contract
 /// calls. Same reason as above for avoiding a direct crate dep.
 #[contractclient(name = "CircuitBreakerClient")]
 pub trait CircuitBreakerInterface {
+    fn interface_version(env: Env) -> u32;
     fn is_frozen(env: Env) -> bool;
 }
 
@@ -131,7 +175,8 @@ pub trait CircuitBreakerInterface {
 /// engine's allowlist check.
 #[contractclient(name = "AllowlistCheckClient")]
 pub trait AllowlistCheckInterface {
-    fn is_allowed(env: Env, address: Address) -> bool;
+    fn interface_version(env: Env) -> u32;
+    fn is_allowed(env: Env, address: Address) -> CheckResult;
 }
 
 /// Amount-aware compliance check interface.
@@ -353,6 +398,9 @@ pub enum Error {
     /// Returned by `commit_upgrade` when no upgrade is pending or its delay
     /// has not elapsed.
     UpgradeNotReady = 9,
+    /// Returned when a configured check contract reports an
+    /// `interface_version()` that does not match [`CHECK_INTERFACE_VERSION`].
+    IncompatibleCheckInterface = 10,
 }
 
 /// Default maximum number of checks that can be registered in a single
@@ -411,10 +459,10 @@ pub struct PolicyResult {
     pub passed: bool,
     pub from: Address,
     pub to: Address,
-    /// Name of the policy that produced this result.
-    pub policy_name: Symbol,
-    /// Version of the policy at evaluation time.
-    pub policy_version: u32,
+    /// Machine-readable reason code for the decision (e.g. `"OK"`,
+    /// `"DENYLISTED"`, `"FROZEN"`, `"AllFailed"`). Lets off-chain tooling
+    /// surface *why* a policy denied without a second call.
+    pub code: Symbol,
 }
 
 /// Emitted whenever the contract is upgraded to a new WASM implementation,
@@ -893,31 +941,17 @@ impl PolicyEngine {
     /// }
     /// ```
     pub fn evaluate(env: Env, from: Address, to: Address) -> Result<bool, Error> {
-        let name = Self::default_policy_name(&env)?;
-        let policy = Self::load_policy(&env, &name)?;
-        let (passed, _) = Self::evaluate_inner(&env, &name, &policy, &from, &to, None);
-        Ok(passed)
-    }
-
-    /// Evaluate a named policy against a single `address` (e.g. the sender of
-    /// a transfer). Returns `Ok(true)` if the policy passes.
-    pub fn evaluate_policy(env: Env, name: Symbol, address: Address) -> Result<bool, Error> {
-        let policy = Self::load_policy(&env, &name)?;
-        let (passed, _) = Self::evaluate_inner(&env, &name, &policy, &address, &address, None);
-        Ok(passed)
-    }
-
-    /// Evaluate a named policy against a single `address`, forwarding an
-    /// optional transfer `amount` to amount-aware checks.
-    pub fn evaluate_with_amount(
-        env: Env,
-        name: Symbol,
-        address: Address,
-        amount: Option<i128>,
-    ) -> Result<bool, Error> {
-        let policy = Self::load_policy(&env, &name)?;
-        let (passed, _) =
-            Self::evaluate_inner(&env, &name, &policy, &address, &address, amount);
+        let checks: Vec<CheckKind> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Checks)
+            .ok_or(Error::NotInitialized)?;
+        let op: CombineOp = env
+            .storage()
+            .instance()
+            .get(&DataKey::CombineOp)
+            .ok_or(Error::NotInitialized)?;
+        let (passed, _, _) = Self::evaluate_inner(&env, &checks, &op, &from, &to)?;
         Ok(passed)
     }
 
@@ -929,8 +963,8 @@ impl PolicyEngine {
         let policy = Self::load_policy(&env, &name)?;
         let mut results = Vec::new(&env);
         for pair in pairs.iter() {
-            let (passed, _) =
-                Self::evaluate_inner(&env, &name, &policy, &pair.from, &pair.to, None);
+            let (passed, _, _) =
+                Self::evaluate_inner(&env, &checks, &op, &pair.from, &pair.to)?;
             results.push_back(passed);
         }
         Ok(results)
@@ -986,89 +1020,73 @@ impl PolicyEngine {
             .instance()
             .get(&DataKey::CombineOp)
             .ok_or(Error::NotInitialized)?;
-
-        let circuit_breaker_frozen = match env
-            .storage()
-            .instance()
-            .get::<DataKey, Address>(&DataKey::CircuitBreaker)
-        {
-            Some(addr) => CircuitBreakerClient::new(&env, &addr).is_frozen(),
-            None => false,
-        };
-
-        let mut outcomes = Vec::new(&env);
-        let mut all_pass = true;
-        let mut any_pass = false;
-        for i in 0..checks.len() {
-            let check = checks.get(i).unwrap();
-            let from_passed = Self::run_check(&env, &check, &from);
-            let to_passed = Self::run_check(&env, &check, &to);
-            let both = from_passed && to_passed;
-            all_pass &= both;
-            any_pass |= both;
-            outcomes.push_back(CheckOutcome {
-                check_index: i,
-                kind: Self::check_kind_symbol(&env, &check),
-                from_passed,
-                to_passed,
-            });
-        }
-
-        // Same combine rules as `evaluate_inner`: `All` is vacuously true for an
-        // empty policy, `Any` is false.
-        let policy_passed = match op {
-            CombineOp::All => all_pass,
-            CombineOp::Any => any_pass,
-        };
-
-        Ok(DryRunResult {
-            passed: policy_passed && !circuit_breaker_frozen,
-            circuit_breaker_frozen,
-            checks: outcomes,
-        })
+        let result = Self::evaluate_inner(&env, &checks, &op, &from, &to)?;
+        Ok((result.0, result.1))
     }
 
+    /// Core evaluation. Returns `(passed, failure_detail, reason_code)`.
+    ///
+    /// Before any check is called, each configured check contract's
+    /// `interface_version()` is verified against
+    /// [`CHECK_INTERFACE_VERSION`]; a mismatch aborts with
+    /// `Err(Error::IncompatibleCheckInterface)` rather than silently calling
+    /// an incompatible implementer. The reason code from the shared
+    /// [`CheckResult`] is propagated into the emitted `PolicyResult` event.
     fn evaluate_inner(
         env: &Env,
         name: &Symbol,
         policy: &Policy,
         from: &Address,
         to: &Address,
-        amount: Option<i128>,
-    ) -> (bool, Option<CheckFailure>) {
+    ) -> Result<(bool, Option<CheckFailure>, Symbol), Error> {
+        // Verify every configured check speaks the expected interface
+        // version before we call any of them.
+        for i in 0..checks.len() {
+            let check = checks.get(i).unwrap();
+            Self::verify_check_interface(env, &check)?;
+        }
+
         let breaker_addr: Option<Address> = env
             .storage()
             .instance()
             .get::<DataKey, Address>(&DataKey::CircuitBreaker);
         if let Some(addr) = breaker_addr {
             if CircuitBreakerClient::new(env, &addr).is_frozen() {
+                let code = Symbol::new(env, "FROZEN");
                 PolicyResult {
                     passed: false,
                     from: from.clone(),
                     to: to.clone(),
-                    policy_name: name.clone(),
-                    policy_version: policy.policy_version,
+                    code: code.clone(),
                 }
                 .publish(env);
-                return (false, None);
+                return Ok((false, None, code));
             }
         }
 
         let checks = &policy.checks;
         let result = match policy.op {
             CombineOp::All => {
-                let mut result = (true, None);
+                let mut result = (true, None, Symbol::new(env, "OK"));
                 for i in 0..checks.len() {
                     let check = checks.get(i).unwrap();
-                    if !Self::run_check(env, &check, from, amount)
-                        || !Self::run_check(env, &check, to, amount)
-                    {
+                    let from_res = Self::run_check(env, &check, from);
+                    let to_res = Self::run_check(env, &check, to);
+                    if !from_res.allowed || !to_res.allowed {
+                        // Prefer the failing side's reason code so callers
+                        // see why the check denied.
+                        let code = if !from_res.allowed {
+                            from_res.code
+                        } else {
+                            to_res.code
+                        };
                         result = (
                             false,
                             Some(CheckFailure {
                                 check_index: i,
                                 kind: Self::check_kind_symbol(env, &check),
                             }),
+                            code,
                         );
                         break;
                     }
@@ -1077,20 +1095,26 @@ impl PolicyEngine {
             }
             CombineOp::Any => {
                 if checks.is_empty() {
-                    (false, None)
+                    (false, None, Symbol::new(env, "NoChecks"))
                 } else {
                     let mut any_pass = false;
+                    let mut last_code = Symbol::new(env, "AllFailed");
                     for i in 0..checks.len() {
                         let check = checks.get(i).unwrap();
-                        if Self::run_check(env, &check, from, amount)
-                            && Self::run_check(env, &check, to, amount)
-                        {
+                        let from_res = Self::run_check(env, &check, from);
+                        let to_res = Self::run_check(env, &check, to);
+                        if from_res.allowed && to_res.allowed {
                             any_pass = true;
                             break;
                         }
+                        last_code = if !from_res.allowed {
+                            from_res.code
+                        } else {
+                            to_res.code
+                        };
                     }
                     if any_pass {
-                        (true, None)
+                        (true, None, Symbol::new(env, "OK"))
                     } else {
                         // Every check failed under `Any`, so no individual
                         // check is representative. Surface the dedicated
@@ -1101,6 +1125,7 @@ impl PolicyEngine {
                                 check_index: u32::MAX,
                                 kind: Symbol::new(env, "AllFailed"),
                             }),
+                            last_code,
                         )
                     }
                 }
@@ -1111,11 +1136,10 @@ impl PolicyEngine {
             passed: result.0,
             from: from.clone(),
             to: to.clone(),
-            policy_name: name.clone(),
-            policy_version: policy.policy_version,
+            code: result.2.clone(),
         }
         .publish(env);
-        result
+        Ok(result)
     }
 
     // -----------------------------------------------------------------------
@@ -1201,7 +1225,31 @@ impl PolicyEngine {
     // Private helpers
     // -----------------------------------------------------------------------
 
-    fn run_check(env: &Env, check: &CheckKind, address: &Address) -> bool {
+    /// Verifies that the contract backing `check` reports a compatible
+    /// `interface_version()`. Returns
+    /// `Err(Error::IncompatibleCheckInterface)` on mismatch.
+    fn verify_check_interface(env: &Env, check: &CheckKind) -> Result<(), Error> {
+        let version = match check {
+            CheckKind::Denylist(params) => {
+                DenylistCheckClient::new(env, &params.contract).interface_version()
+            }
+            CheckKind::Jurisdiction(params) => {
+                JurisdictionCheckClient::new(env, &params.contract).interface_version()
+            }
+            CheckKind::Allowlist(params) => {
+                AllowlistCheckClient::new(env, &params.contract).interface_version()
+            }
+            CheckKind::CircuitBreaker(params) => {
+                CircuitBreakerClient::new(env, &params.contract).interface_version()
+            }
+        };
+        if version != CHECK_INTERFACE_VERSION {
+            return Err(Error::IncompatibleCheckInterface);
+        }
+        Ok(())
+    }
+
+    fn run_check(env: &Env, check: &CheckKind, address: &Address) -> CheckResult {
         match check {
             CheckKind::Denylist(params) => {
                 let client = DenylistCheckClient::new(env, &params.contract);
@@ -1210,10 +1258,13 @@ impl PolicyEngine {
             CheckKind::Jurisdiction(params) => {
                 let client = JurisdictionCheckClient::new(env, &params.contract);
                 // A callee error (e.g. `EmptyAllowedCodes`) fails the check.
-                matches!(
-                    client.try_is_permitted_jurisdiction(address, &params.allowed_codes),
-                    Ok(Ok(true))
-                )
+                match client.try_is_permitted_jurisdiction(address, &params.allowed_codes) {
+                    Ok(Ok(result)) => result,
+                    _ => CheckResult {
+                        allowed: false,
+                        code: Symbol::new(env, "CheckError"),
+                    },
+                }
             }
             CheckKind::Allowlist(params) => {
                 let client = AllowlistCheckClient::new(env, &params.contract);
@@ -1225,7 +1276,17 @@ impl PolicyEngine {
                 // when the breaker is NOT frozen.
                 let _ = address; // address not used for this check kind
                 let client = CircuitBreakerClient::new(env, &params.contract);
-                !client.is_frozen()
+                if client.is_frozen() {
+                    CheckResult {
+                        allowed: false,
+                        code: Symbol::new(env, "FROZEN"),
+                    }
+                } else {
+                    CheckResult {
+                        allowed: true,
+                        code: Symbol::new(env, "OK"),
+                    }
+                }
             }
         }
     }

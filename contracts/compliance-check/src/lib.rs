@@ -30,28 +30,79 @@
 //! ## Usage
 //!
 //! ```ignore
-//! use compliance_check::ComplianceCheck;
+//! use compliance_check::{ComplianceCheck, CheckResult, INTERFACE_VERSION};
 //!
 //! // A generic helper that works with ANY compliance contract:
 //! fn all_pass<C: ComplianceCheck>(env: &Env, check: &C, address: &Address) -> bool {
-//!     check.is_compliant(env, address.clone())
+//!     // Verify the implementer speaks a compatible interface before calling.
+//!     let version = C::interface_version(env);
+//!     assert!(version == INTERFACE_VERSION, "incompatible compliance interface");
+//!     check.is_compliant(env, address.clone()).allowed
 //! }
 //! ```
 //!
-//! ## Amount-aware checks
+//! ## Migration (interface v1 -> v2)
 //!
-//! Some compliance rules depend on the transfer amount (e.g. travel-rule
-//! thresholds).  [`ComplianceCheck::is_compliant_with_amount`] accepts an
-//! optional amount so such rules can be expressed.  It has a default
-//! implementation that ignores the amount and delegates to
-//! [`ComplianceCheck::is_compliant`], so existing implementors keep working
-//! unchanged; contracts with amount limits override it.
+//! The trait was previously unversioned and `is_compliant` returned a plain
+//! `bool`.  Interface version 2 changes the contract of the trait:
+//!
+//! - `is_compliant` now returns [`CheckResult`] (`{ allowed, code }`) instead of
+//!   `bool`.  Callers that only need pass/fail should read `.allowed`.
+//! - Implementers must add `fn interface_version(env: &Env) -> u32` returning
+//!   [`INTERFACE_VERSION`] (or the version they actually implement).
+//! - Callers must verify `interface_version()` is within the range they support
+//!   before invoking `is_compliant`, so that deployed implementers built against
+//!   an older interface fail loudly instead of silently misbehaving.
 #![no_std]
 
-use soroban_sdk::{Address, Env};
+use soroban_sdk::{contractmeta, Address, Env};
+
+contractmeta!(key = "version", val = env!("CARGO_PKG_VERSION"));
+contractmeta!(key = "source", val = env!("CARGO_PKG_REPOSITORY"));
+
+/// Current version of the [`ComplianceCheck`] trait interface.
+///
+/// Bump this whenever the trait's method signatures or semantics change so that
+/// callers can detect incompatible deployed implementers.
+pub const INTERFACE_VERSION: u32 = 2;
+
+/// Stable reason code: the address passed the check.
+pub const CODE_ALLOWED: u32 = 0;
+/// Stable reason code: the address is not on the allowlist.
+pub const CODE_NOT_ALLOWLISTED: u32 = 1;
+/// Stable reason code: the address is on the denylist.
+pub const CODE_DENYLISTED: u32 = 2;
+/// Stable reason code: the address has no permitted jurisdiction.
+pub const CODE_NO_JURISDICTION: u32 = 3;
+
+/// Result of a compliance check.
+///
+/// `allowed` is the pass/fail outcome; `code` is a stable reason code
+/// (see [`CODE_ALLOWED`], [`CODE_NOT_ALLOWLISTED`], [`CODE_DENYLISTED`],
+/// [`CODE_NO_JURISDICTION`]) so aggregators and wallets can explain why a
+/// check failed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CheckResult {
+    /// `true` if the address passed the check.
+    pub allowed: bool,
+    /// Stable reason code describing the outcome.
+    pub code: u32,
+}
+
+impl CheckResult {
+    /// Construct an allowed result with [`CODE_ALLOWED`].
+    pub const fn allowed() -> Self {
+        Self { allowed: true, code: CODE_ALLOWED }
+    }
+
+    /// Construct a denied result with the given reason `code`.
+    pub const fn denied(code: u32) -> Self {
+        Self { allowed: false, code }
+    }
+}
 
 /// Shared compile-time trait for compliance contracts that expose a simple
-/// `is_compliant(address) -> bool` check.
+/// `is_compliant(address) -> CheckResult` check.
 ///
 /// Implementing this trait on a contract struct allows generic callers (tests,
 /// other contracts linked at compile time) to use all three compliance
@@ -70,32 +121,15 @@ use soroban_sdk::{Address, Env};
 /// `#[contractclient]`-backed interface for _runtime_ cross-contract calls.
 /// This trait is the _compile-time_ counterpart for in-process composition.
 pub trait ComplianceCheck {
-    /// Returns `true` if `address` passes this compliance check, `false`
-    /// otherwise.
+    /// Returns the version of this trait interface implemented by the contract.
     ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// // Generic helper that works with any implementing contract.
-    /// fn all_pass<C: ComplianceCheck>(env: &Env, address: &Address) -> bool {
-    ///     C::is_compliant(env, address.clone())
-    /// }
-    /// ```
-    fn is_compliant(env: &Env, address: Address) -> bool;
+    /// Callers should compare this against [`INTERFACE_VERSION`] (or their
+    /// supported range) before calling [`is_compliant`](Self::is_compliant).
+    fn interface_version(env: &Env) -> u32;
 
-    /// Returns `true` if `address` passes this compliance check for a transfer
-    /// of `amount`, `false` otherwise.
-    ///
-    /// `amount` is optional so callers that do not know (or care about) the
-    /// transfer size can still use the check.  The default implementation
-    /// ignores `amount` and delegates to [`Self::is_compliant`], preserving
-    /// backward compatibility for implementors without amount-based rules.
-    /// Contracts that enforce amount limits (e.g. travel-rule thresholds)
-    /// should override this method.
-    fn is_compliant_with_amount(env: &Env, address: Address, amount: Option<i128>) -> bool {
-        let _ = amount;
-        Self::is_compliant(env, address)
-    }
+    /// Returns a [`CheckResult`] describing whether `address` passes this
+    /// compliance check and, if not, why.
+    fn is_compliant(env: &Env, address: Address) -> CheckResult;
 }
 
 #[cfg(test)]

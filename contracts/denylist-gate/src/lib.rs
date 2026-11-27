@@ -76,9 +76,12 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractclient, contracterror, contractevent, contractimpl, contracttype, Address,
-    BytesN, Env, String, Symbol, Vec,
+    contract, contractclient, contracterror, contractevent, contractimpl, contractmeta,
+    contracttype, Address, BytesN, Env, String, Symbol, Vec,
 };
+
+contractmeta!(key = "version", val = env!("CARGO_PKG_VERSION"));
+contractmeta!(key = "source", val = env!("CARGO_PKG_REPOSITORY"));
 
 /// Batch operations are capped to reduce the chance of a single invocation
 /// exceeding Soroban instruction/resource limits. Set to 45 to fit comfortably
@@ -161,6 +164,33 @@ pub struct DenyEntry {
 
 /// Current on-chain schema version for this contract instance.
 pub const SCHEMA_VERSION: u32 = 1;
+
+/// Version of the shared `ComplianceCheck` interface implemented by this
+/// contract. Bumped whenever the trait's method set or result shape changes.
+///
+/// Callers must compare this against the version they were built against
+/// (see [`DenylistGate::interface_version`]) before calling `is_compliant`.
+pub const INTERFACE_VERSION: u32 = 2;
+
+/// Reason code returned in [`CheckResult::code`] when an address is clear to
+/// transact.
+pub const REASON_ALLOWED: u32 = 0;
+/// Reason code returned when the address is on the denylist.
+pub const REASON_DENYLISTED: u32 = 1;
+
+/// Result of the shared `ComplianceCheck` interface.
+///
+/// `allowed` is the pass/fail verdict; `code` explains it. A `code` of
+/// [`REASON_ALLOWED`] (0) always accompanies `allowed == true`. Non-zero codes
+/// accompany `allowed == false` and identify the reason:
+///
+/// - [`REASON_DENYLISTED`] (1): the address is on the denylist.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckResult {
+    pub allowed: bool,
+    pub code: u32,
+}
 
 /// The M-of-N signer set, stored under `DataKey::SignerSet` in instance
 /// storage once `initialize_multisig` has run.
@@ -965,16 +995,40 @@ impl DenylistGate {
         Err(Error::ReceiverDenied)
     }
 
-    /// Unified compliance check — returns `true` if `address` is NOT on the
-    /// denylist, identical to calling [`check`].
+    /// Unified compliance check — returns a [`CheckResult`] describing whether
+    /// `address` is clear to transact and, if not, why.
     ///
     /// This entry point implements the shared `ComplianceCheck` interface
-    /// (`is_compliant(address) -> bool`) so external contracts can call any
-    /// of the three compliance primitives through the same pattern.
+    /// (`is_compliant(address) -> CheckResult`) so external contracts can call
+    /// any of the three compliance primitives through the same pattern.
+    ///
+    /// `allowed` is `true` (with `code == REASON_ALLOWED`) when the address is
+    /// not on the denylist, and `false` (with `code == REASON_DENYLISTED`)
+    /// when it is.
+    ///
+    /// Callers should check [`interface_version`] against the version they
+    /// were built against before calling this method.
     ///
     /// **Not** affected by pause state — reads always succeed.
-    pub fn is_compliant(env: Env, address: Address) -> bool {
-        Self::check(env, address)
+    pub fn is_compliant(env: Env, address: Address) -> CheckResult {
+        if Self::check(env, address) {
+            CheckResult {
+                allowed: true,
+                code: REASON_ALLOWED,
+            }
+        } else {
+            CheckResult {
+                allowed: false,
+                code: REASON_DENYLISTED,
+            }
+        }
+    }
+
+    /// Version of the shared `ComplianceCheck` interface implemented by this
+    /// contract (see [`INTERFACE_VERSION`]). Callers must verify this matches
+    /// the version they were built against before calling `is_compliant`.
+    pub fn interface_version(_env: Env) -> u32 {
+        INTERFACE_VERSION
     }
 
     /// Return whether `address` is currently stored on the denylist.

@@ -109,20 +109,17 @@
 //! A [`PauserChanged`] event is emitted whenever the pauser is set or cleared.
 #![no_std]
 
-use soroban_sdk::{contracttype, symbol_short, Address, Env, String, Symbol};
+use soroban_sdk::{contractmeta, contracttype, Env, String};
 
-/// Topic symbol for the event emitted when the pauser role changes.
-pub const PAUSER_CHANGED: Symbol = symbol_short!("pauser");
-
-/// Event payload emitted by [`set_pauser`] and [`clear_pauser`].
-///
-/// `pauser` is `Some(address)` when the role is assigned and `None` when it is
-/// cleared.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PauserChanged {
-    pub pauser: Option<Address>,
-}
+// Embed crate version and repository URL into the WASM custom section so
+// deployed artifacts can be traced back to a release. `contractmeta!` expands
+// to a `#[link_section]` static, which is only meaningful (and only accepted)
+// when compiling for a wasm target; guard it so the plain rlib build still
+// compiles.
+#[cfg(target_family = "wasm")]
+contractmeta!(key = "version", val = env!("CARGO_PKG_VERSION"));
+#[cfg(target_family = "wasm")]
+contractmeta!(key = "source", val = env!("CARGO_PKG_REPOSITORY"));
 
 #[contracttype]
 #[derive(Clone)]

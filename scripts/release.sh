@@ -184,6 +184,73 @@ if ! git diff --quiet || ! git diff --cached --quiet; then
 fi
 
 # ---------------------------------------------------------------------------
+# Verify contract metadata (contractmeta! version + source) in built WASM
+# ---------------------------------------------------------------------------
+# Every contract must embed `contractmeta!(key = "version", ...)` and
+# `contractmeta!(key = "source", ...)`. We build the workspace to wasm and
+# inspect each artifact, failing the release if either key is missing.
+echo "Verifying contract metadata in wasm artifacts..."
+
+if ! command -v cargo &>/dev/null; then
+  echo "error: 'cargo' is required to verify contract metadata" >&2
+  exit 1
+fi
+
+WASM_TARGET_DIR="${CARGO_TARGET_DIR:-target}"
+WASM_OUT_DIR="${WASM_TARGET_DIR}/wasm32-unknown-unknown/release"
+
+cargo build --release --target wasm32-unknown-unknown --workspace
+
+shopt -s nullglob
+WASM_FILES=("$WASM_OUT_DIR"/*.wasm)
+shopt -u nullglob
+
+if [ "${#WASM_FILES[@]}" -eq 0 ]; then
+  echo "error: no wasm artifacts found in '$WASM_OUT_DIR'" >&2
+  exit 1
+fi
+
+META_FAILED=0
+for wasm in "${WASM_FILES[@]}"; do
+  name="$(basename "$wasm")"
+
+  # Dump the contract metadata section. `stellar contract info` prints the
+  # embedded meta entries; fall back to a raw string scan of the binary if the
+  # CLI is unavailable.
+  if command -v stellar &>/dev/null; then
+    META_DUMP=$(stellar contract info meta \
+      --wasm "$wasm" 2>/dev/null || true)
+  else
+    META_DUMP=$(strings "$wasm" 2>/dev/null || true)
+  fi
+
+  MISSING=""
+  if ! grep -q 'version' <<<"$META_DUMP"; then
+    MISSING="${MISSING} version"
+  fi
+  if ! grep -q 'source' <<<"$META_DUMP"; then
+    MISSING="${MISSING} source"
+  fi
+
+  if [ -n "$MISSING" ]; then
+    echo "error: $name is missing contractmeta key(s):$MISSING" >&2
+    META_FAILED=1
+  else
+    echo "  ok: $name has version + source metadata"
+  fi
+done
+
+if [ "$META_FAILED" -ne 0 ]; then
+  echo "error: one or more contracts lack required contractmeta entries" >&2
+  echo "       Add contractmeta!(key = \"version\", val = env!(\"CARGO_PKG_VERSION\"))" >&2
+  echo "       and contractmeta!(key = \"source\", val = env!(\"CARGO_PKG_REPOSITORY\"))" >&2
+  exit 1
+fi
+
+echo "Contract metadata verification passed."
+echo ""
+
+# ---------------------------------------------------------------------------
 # Create the annotated git tag (idempotent if it already exists)
 # ---------------------------------------------------------------------------
 if git rev-parse "$TAG" &>/dev/null; then

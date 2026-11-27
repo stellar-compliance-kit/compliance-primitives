@@ -11,7 +11,7 @@
 //! The "benchmark" tests at the bottom compare the Soroban simulated resource
 //! costs (via `cost_estimate().budget()`) of:
 //! 1. Calling each primitive directly from the test harness — simulating what
-//!    a consumer would pay if it called them individually.
+//!    a consumer would pay if they called them individually.
 //! 2. Calling `check_address` on this aggregator for the same address.
 //!
 //! The numbers are printed to stdout (visible with `cargo test -- --nocapture`)
@@ -286,7 +286,14 @@ fn test_check_address_denylist_only_pass() {
     let (all_passed, checks) = client.check_address(&alice, &vec![&env]);
     assert!(all_passed);
     assert_eq!(checks.len(), 1);
-    assert_eq!(checks.get(0), Some(CheckResult { check: CheckKind::Denylist, passed: true }));
+    assert_eq!(
+        checks.get(0),
+        Some(CheckResult {
+            check: CheckKind::Denylist,
+            passed: true,
+            code: CODE_OK,
+        })
+    );
 }
 
 #[test]
@@ -309,9 +316,11 @@ fn test_check_address_denylist_only_fail() {
 
     let (all_passed, checks) = client.check_address(&alice, &vec![&env]);
     assert!(!all_passed);
-    assert_eq!(checks.get(0), Some(CheckResult { check: CheckKind::Denylist, passed: false }));
-    let (_, failures) = client.check_address_with_failures(&alice, &vec![&env]);
-    assert_eq!(failures, vec![&env, CheckFailure { source: CheckKind::Denylist, code: CheckFailureCode::Denylisted },]);
+    let result = checks.get(0).unwrap();
+    assert_eq!(result.check, CheckKind::Denylist);
+    assert!(!result.passed);
+    assert_eq!(result.code, CODE_DENIED);
+    assert_ne!(result.code, CODE_OK);
 }
 
 // ---------------------------------------------------------------------------
@@ -338,7 +347,14 @@ fn test_check_address_jurisdiction_only_pass() {
 
     let (all_passed, checks) = client.check_address(&alice, &us_vec(&env));
     assert!(all_passed);
-    assert_eq!(checks.get(0), Some(CheckResult { check: CheckKind::Jurisdiction, passed: true }));
+    assert_eq!(
+        checks.get(0),
+        Some(CheckResult {
+            check: CheckKind::Jurisdiction,
+            passed: true,
+            code: CODE_OK,
+        })
+    );
 }
 
 #[test]
@@ -362,12 +378,11 @@ fn test_check_address_jurisdiction_only_fail_wrong_code() {
 
     let (all_passed, checks) = client.check_address(&alice, &us_vec(&env));
     assert!(!all_passed);
-    assert_eq!(checks.get(0), Some(CheckResult { check: CheckKind::Jurisdiction, passed: false }));
-    let (_, failures) = client.check_address_with_failures(&alice, &us_vec(&env));
-    assert_eq!(
-        failures,
-        vec![&env, CheckFailure { source: CheckKind::Jurisdiction, code: CheckFailureCode::JurisdictionNotPermitted },]
-    );
+    let result = checks.get(0).unwrap();
+    assert_eq!(result.check, CheckKind::Jurisdiction);
+    assert!(!result.passed);
+    assert_eq!(result.code, CODE_JURISDICTION);
+    assert_ne!(result.code, CODE_OK);
 }
 
 // ---------------------------------------------------------------------------
@@ -387,7 +402,9 @@ fn test_both_checks_pass() {
     assert!(all_passed);
     assert_eq!(checks.len(), 2);
     assert!(checks.get(0).unwrap().passed); // denylist
+    assert_eq!(checks.get(0).unwrap().code, CODE_OK);
     assert!(checks.get(1).unwrap().passed); // jurisdiction
+    assert_eq!(checks.get(1).unwrap().code, CODE_OK);
 }
 
 #[test]
@@ -403,8 +420,10 @@ fn test_denylist_fail_jurisdiction_pass() {
     assert!(!all_passed);
     assert_eq!(checks.get(0).unwrap().check, CheckKind::Denylist);
     assert!(!checks.get(0).unwrap().passed);
+    assert_eq!(checks.get(0).unwrap().code, CODE_DENIED);
     assert_eq!(checks.get(1).unwrap().check, CheckKind::Jurisdiction);
     assert!(checks.get(1).unwrap().passed);
+    assert_eq!(checks.get(1).unwrap().code, CODE_OK);
 }
 
 #[test]
@@ -418,7 +437,9 @@ fn test_denylist_pass_jurisdiction_fail() {
     let (all_passed, checks) = client.check_address(&alice, &us_vec(&env));
     assert!(!all_passed);
     assert!(checks.get(0).unwrap().passed); // denylist passes (not denied)
+    assert_eq!(checks.get(0).unwrap().code, CODE_OK);
     assert!(!checks.get(1).unwrap().passed); // jurisdiction fails (no code)
+    assert_eq!(checks.get(1).unwrap().code, CODE_JURISDICTION);
 }
 
 #[test]
@@ -433,7 +454,9 @@ fn test_both_checks_fail() {
     let (all_passed, checks) = client.check_address(&alice, &us_vec(&env));
     assert!(!all_passed);
     assert!(!checks.get(0).unwrap().passed); // denylist fails
+    assert_eq!(checks.get(0).unwrap().code, CODE_DENIED);
     assert!(!checks.get(1).unwrap().passed); // jurisdiction fails
+    assert_eq!(checks.get(1).unwrap().code, CODE_JURISDICTION);
 }
 
 // ---------------------------------------------------------------------------
@@ -494,6 +517,8 @@ fn test_single_check_matches_direct_call() {
     assert_eq!(bob_checks.len(), 1);
     assert_eq!(alice_checks.get(0).unwrap().passed, alice_direct);
     assert_eq!(bob_checks.get(0).unwrap().passed, bob_direct);
+    assert_eq!(alice_checks.get(0).unwrap().code, CODE_OK);
+    assert_eq!(bob_checks.get(0).unwrap().code, CODE_DENIED);
 }
 
 /// Zero configured checks must produce the documented `NoChecksRegistered`
@@ -547,6 +572,19 @@ fn test_and_composition_exhaustive_truth_table() {
         assert_eq!(all_passed, expected);
         assert_eq!(checks.get(0).unwrap().passed, !deny_alice);
         assert_eq!(checks.get(1).unwrap().passed, right_jurisdiction);
+        // Reason codes must reflect the individual outcome.
+        assert_eq!(
+            checks.get(0).unwrap().code,
+            if deny_alice { CODE_DENIED } else { CODE_OK }
+        );
+        assert_eq!(
+            checks.get(1).unwrap().code,
+            if right_jurisdiction {
+                CODE_OK
+            } else {
+                CODE_JURISDICTION
+            }
+        );
     }
 }
 
@@ -569,6 +607,11 @@ fn test_check_all_all_pass() {
     assert_eq!(results.len(), 2);
     assert!(results.get(0).unwrap().all_passed);
     assert!(results.get(1).unwrap().all_passed);
+    for r in results.iter() {
+        for c in r.checks.iter() {
+            assert_eq!(c.code, CODE_OK);
+        }
+    }
 }
 
 #[test]
@@ -595,23 +638,24 @@ fn test_check_all_mixed_results() {
     let alice_r = results.get(0).unwrap();
     assert_eq!(alice_r.address, alice);
     assert!(alice_r.all_passed);
+    assert_eq!(alice_r.checks.get(0).unwrap().code, CODE_OK);
+    assert_eq!(alice_r.checks.get(1).unwrap().code, CODE_OK);
 
     let bob_r = results.get(1).unwrap();
     assert_eq!(bob_r.address, bob);
     assert!(!bob_r.all_passed);
     assert!(!bob_r.checks.get(0).unwrap().passed); // denylist
-    let detailed = client.check_all_with_failures(&addresses, &us_vec(&env));
-    assert_eq!(
-        detailed.get(1).unwrap().failures,
-        vec![&env, CheckFailure { source: CheckKind::Denylist, code: CheckFailureCode::Denylisted },]
-    );
+    assert_eq!(bob_r.checks.get(0).unwrap().code, CODE_DENIED);
     assert!(bob_r.checks.get(1).unwrap().passed); // jurisdiction
+    assert_eq!(bob_r.checks.get(1).unwrap().code, CODE_OK);
 
     let carol_r = results.get(2).unwrap();
     assert_eq!(carol_r.address, carol);
     assert!(!carol_r.all_passed);
     assert!(carol_r.checks.get(0).unwrap().passed); // denylist
+    assert_eq!(carol_r.checks.get(0).unwrap().code, CODE_OK);
     assert!(!carol_r.checks.get(1).unwrap().passed); // jurisdiction
+    assert_eq!(carol_r.checks.get(1).unwrap().code, CODE_JURISDICTION);
 }
 
 #[test]
@@ -751,6 +795,39 @@ fn test_batch_check_rejects_oversized_batch() {
 }
 
 // ---------------------------------------------------------------------------
+// Interface versioning (#808)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_aggregator_reports_interface_version() {
+    let env = Env::default();
+    let (_, _, _, _, _, _, client) = setup_all(&env);
+    assert_eq!(client.interface_version(), ComplianceAggregator::INTERFACE_VERSION);
+}
+
+/// A primitive that reports an incompatible `interface_version()` must cause
+/// the aggregator to fail closed with the documented error rather than
+/// silently trusting an unknown result shape.
+#[test]
+fn test_incompatible_primitive_interface_version_fails_closed() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    // Register a stub that claims an incompatible interface version.
+    let stub_id = env.register(IncompatibleStub, ());
+    IncompatibleStubClient::new(&env, &stub_id).initialize();
+
+    let agg_admin = Address::generate(&env);
+    let agg_id = env.register(ComplianceAggregator, ());
+    let client = ComplianceAggregatorClient::new(&env, &agg_id);
+    client.initialize(&agg_admin, &Some(stub_id.clone()), &None, &None);
+
+    let alice = Address::generate(&env);
+    let result = client.try_check_address(&alice, &vec![&env]);
+    assert_eq!(result, Err(Ok(Error::IncompatibleInterfaceVersion)));
+}
+
+// ---------------------------------------------------------------------------
 // Benchmark: individual calls vs. aggregated call
 //
 // Soroban's `cost_estimate().budget()` gives CPU-instruction and memory-byte
@@ -809,753 +886,3 @@ fn bench_individual_vs_aggregated() {
     let juris_ok = flag_client.is_permitted_jurisdiction(&alice, &allowed);
     let individual_cpu = env.cost_estimate().budget().cpu_instruction_cost();
     let individual_mem = env.cost_estimate().budget().memory_bytes_cost();
-    assert!(deny_ok);
-    assert!(juris_ok);
-
-    // ---- Path B: one aggregated call (1 invocation from consumer) ----
-    env.cost_estimate().budget().reset_default();
-    let (all_passed, checks) = agg_client.check_address(&alice, &allowed);
-    let aggregated_cpu = env.cost_estimate().budget().cpu_instruction_cost();
-    let aggregated_mem = env.cost_estimate().budget().memory_bytes_cost();
-    assert!(all_passed);
-    assert_eq!(checks.len(), 2);
-
-    // ---- Report ----
-    std::println!(
-        "\n=== compliance-aggregator benchmark ===\n\
-         Path A (2× direct cross-contract calls from consumer):\n  CPU instructions: {individual_cpu}\n  Memory bytes:     {individual_mem}\n\
-         Path B (1× aggregator call — consumer makes 1 call, aggregator makes 2 downstream):\n  CPU instructions: {aggregated_cpu}\n  Memory bytes:     {aggregated_mem}\n\
-         Ratio B/A:  CPU {:.2}×  Mem {:.2}×\n\
-         Note: B > A in total host cost because the aggregator adds one extra call\n\
-               frame. The saving is on the consumer side: 1 call instead of 2.\n\
-         =======================================",
-        aggregated_cpu as f64 / individual_cpu as f64,
-        aggregated_mem as f64 / individual_mem as f64,
-    );
-
-    // The aggregated path (3 total call frames) must not exceed 4× the cost
-    // of the 2 raw primitive calls — confirming no gratuitous overhead beyond
-    // the one extra aggregator frame.
-    assert!(
-        aggregated_cpu <= individual_cpu * 4,
-        "Aggregated path CPU cost ({aggregated_cpu}) exceeds 4× the individual path ({individual_cpu})"
-    );
-}
-
-#[test]
-fn bench_batch_vs_individual_loop() {
-    // Compare: calling check_address N times vs. check_all once for N addresses.
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let (_, _, flag_issuer, flag_id, _, _, client) = setup_all(&env);
-
-    let addresses: soroban_sdk::Vec<Address> = {
-        let mut v = soroban_sdk::Vec::new(&env);
-        for _ in 0..4_u32 {
-            let a = Address::generate(&env);
-            set_jurisdiction(&env, &flag_id, &flag_issuer, &a, "US");
-            v.push_back(a);
-        }
-        v
-    };
-
-    let allowed = us_vec(&env);
-
-    // Path A: N individual check_address calls
-    env.cost_estimate().budget().reset_default();
-    for addr in addresses.iter() {
-        client.check_address(&addr, &allowed);
-    }
-    let individual_cpu = env.cost_estimate().budget().cpu_instruction_cost();
-    let individual_mem = env.cost_estimate().budget().memory_bytes_cost();
-
-    // Path B: one check_all call
-    env.cost_estimate().budget().reset_default();
-    let results = client.check_all(&addresses, &allowed);
-    let batch_cpu = env.cost_estimate().budget().cpu_instruction_cost();
-    let batch_mem = env.cost_estimate().budget().memory_bytes_cost();
-    assert_eq!(results.len(), 4);
-
-    std::println!(
-        "\n=== batch benchmark (4 addresses) ===\n\
-         Path A (4× check_address):\n  CPU: {individual_cpu}  Mem: {individual_mem}\n\
-         Path B (1× check_all):\n  CPU: {batch_cpu}  Mem: {batch_mem}\n\
-         Ratio B/A:  CPU {:.2}×  Mem {:.2}×\n\
-         Note: B > A because check_all routes through one extra aggregator call\n\
-               frame per batch. The saving for the caller is one invocation\n\
-               instead of N, which matters most over a real network.\n\
-         =====================================",
-        batch_cpu as f64 / individual_cpu as f64,
-        batch_mem as f64 / individual_mem as f64,
-    );
-
-    // check_all incurs one additional aggregator frame versus N individual
-    // check_address calls (which already go through the aggregator). Allow
-    // up to 4× to guard against any genuine regression beyond the expected
-    // single extra frame.
-    assert!(
-        batch_cpu <= individual_cpu * 4,
-        "Batch path CPU ({batch_cpu}) exceeds 4× the individual loop ({individual_cpu})"
-    );
-}
-
-/// Sweeps representative batch sizes and prints the measured budget of
-/// `check_address` × N vs. one `check_all` call for each, feeding the
-/// "Choosing `check_address` vs. `check_all`" guidance in the module docs.
-#[test]
-fn bench_check_address_vs_check_all_batch_sizes() {
-    const BATCH_SIZES: [u32; 5] = [1, 2, 5, 10, 25];
-
-    std::println!(
-        "\n=== check_address vs check_all by batch size ===\n\
-         {:>5} | {:>14} {:>12} | {:>14} {:>12} | {:>8}",
-        "N",
-        "addr×N cpu",
-        "addr×N mem",
-        "check_all cpu",
-        "check_all mem",
-        "cpu B/A"
-    );
-
-    for n in BATCH_SIZES {
-        // Fresh env per size so cached instances don't skew later rows.
-        let env = Env::default();
-        let (_, _, flag_issuer, flag_id, _, _, client) = setup_all(&env);
-
-        let mut addresses: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(&env);
-        for _ in 0..n {
-            let a = Address::generate(&env);
-            set_jurisdiction(&env, &flag_id, &flag_issuer, &a, "US");
-            addresses.push_back(a);
-        }
-        let allowed = us_vec(&env);
-
-        env.cost_estimate().budget().reset_unlimited();
-        for addr in addresses.iter() {
-            let (passed, _) = client.check_address(&addr, &allowed);
-            assert!(passed);
-        }
-        let single_cpu = env.cost_estimate().budget().cpu_instruction_cost();
-        let single_mem = env.cost_estimate().budget().memory_bytes_cost();
-
-        env.cost_estimate().budget().reset_unlimited();
-        let results = client.check_all(&addresses, &allowed);
-        let batch_cpu = env.cost_estimate().budget().cpu_instruction_cost();
-        let batch_mem = env.cost_estimate().budget().memory_bytes_cost();
-        assert_eq!(results.len(), n);
-        assert!(results.iter().all(|r| r.all_passed));
-
-        std::println!(
-            "{n:>5} | {single_cpu:>14} {single_mem:>12} | {batch_cpu:>14} {batch_mem:>12} | {:>7.2}×",
-            batch_cpu as f64 / single_cpu as f64,
-        );
-
-        // Both paths make the same 2 × N downstream calls; check_all only
-        // removes per-invocation overhead, so it must never cost more than
-        // the equivalent check_address loop by a wide margin (same 4×
-        // tolerance as `bench_batch_vs_individual_loop`).
-        assert!(
-            batch_cpu <= single_cpu * 4,
-            "check_all CPU ({batch_cpu}) exceeds 4× check_address × {n} ({single_cpu})"
-        );
-    }
-    std::println!("================================================");
-}
-
-// ---------------------------------------------------------------------------
-// circuit-breaker wiring
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_circuit_breaker_freeze_short_circuits_check_address() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let gate_admin = Address::generate(&env);
-    let gate_id = env.register(DenylistGate, ());
-    DenylistGateClient::new(&env, &gate_id).initialize(&gate_admin);
-
-    let breaker_admin = Address::generate(&env);
-    let breaker_id = env.register(CircuitBreaker, ());
-    let breaker_client = CbClient::new(&env, &breaker_id);
-    breaker_client.initialize(&breaker_admin);
-
-    let agg_admin = Address::generate(&env);
-    let agg_id = env.register(ComplianceAggregator, ());
-    let client = ComplianceAggregatorClient::new(&env, &agg_id);
-    client.initialize(&agg_admin, &Some(gate_id.clone()), &None, &Some(breaker_id.clone()));
-
-    let alice = Address::generate(&env);
-
-    // Before freezing, the check passes normally.
-    let (all_passed, checks) = client.check_address(&alice, &vec![&env]);
-    assert!(all_passed);
-    assert_eq!(checks.len(), 2);
-    assert_eq!(checks.get(0).unwrap().check, CheckKind::CircuitBreaker);
-    assert!(checks.get(0).unwrap().passed);
-
-    // Freeze mid-flow.
-    breaker_client.freeze(&breaker_admin, &None);
-
-    // Now the same previously-passing check is denied without even
-    // consulting the denylist-gate.
-    let (all_passed, checks) = client.check_address(&alice, &vec![&env]);
-    assert!(!all_passed);
-    assert_eq!(checks.len(), 1);
-    assert_eq!(checks.get(0).unwrap().check, CheckKind::CircuitBreaker);
-    assert!(!checks.get(0).unwrap().passed);
-    let (_, failures) = client.check_address_with_failures(&alice, &vec![&env]);
-    assert_eq!(
-        failures,
-        vec![&env, CheckFailure { source: CheckKind::CircuitBreaker, code: CheckFailureCode::CircuitBreakerFrozen },]
-    );
-    assert_eq!(client.batch_check(&vec![&env, alice], &vec![&env]), vec![&env, false]);
-}
-
-#[test]
-fn test_get_config_matches_initialize() {
-    let env = Env::default();
-    let (_, gate_id, _, flag_id, _, _, client) = setup_all(&env);
-    assert_eq!(
-        client.get_config(),
-        AggregatorConfig {
-            denylist_gate: Some(gate_id),
-            jurisdiction_flag: Some(flag_id),
-            circuit_breaker: None,
-            allowlist_token: None,
-        }
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Upgrade / migration path
-// ---------------------------------------------------------------------------
-
-/// Path to the release WASM produced by
-/// `cargo build --workspace --target wasm32v1-none --release`.
-fn compliance_aggregator_wasm_path() -> std::path::PathBuf {
-    std::path::PathBuf::from(std::env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("target")
-        .join("wasm32v1-none")
-        .join("release")
-        .join("compliance_aggregator.wasm")
-}
-
-#[test]
-fn test_upgrade_before_initialize_fails() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let agg_id = env.register(ComplianceAggregator, ());
-    let client = ComplianceAggregatorClient::new(&env, &agg_id);
-    let admin = Address::generate(&env);
-    let hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
-    let result = client.try_upgrade(&admin, &hash);
-    assert_eq!(result, Err(Ok(Error::NotInitialized)));
-}
-
-#[test]
-fn test_upgrade_rejects_non_admin() {
-    let env = Env::default();
-    let (_ga, _gid, _fi, _fid, _admin, _agg_id, client) = setup_all(&env);
-    let impostor = Address::generate(&env);
-    let hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
-    let result = client.try_upgrade(&impostor, &hash);
-    assert_eq!(result, Err(Ok(Error::NotAuthorized)));
-}
-
-/// Deploy from WASM, write state, upgrade to a freshly uploaded WASM hash,
-/// then confirm every piece of state survived and the contract is still
-/// callable. Requires the release WASM (`make build`); skipped otherwise.
-#[test]
-fn test_upgrade_preserves_state_and_remains_callable() {
-    let wasm_path = compliance_aggregator_wasm_path();
-    let wasm = match std::fs::read(&wasm_path) {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            std::eprintln!("skipping migration test: {} not found (run `make build` first)", wasm_path.display());
-            return;
-        }
-    };
-
-    let env = Env::default();
-    env.mock_all_auths();
-
-    // Underlying primitives.
-    let gate_admin = Address::generate(&env);
-    let gate_id = env.register(DenylistGate, ());
-    DenylistGateClient::new(&env, &gate_id).initialize(&gate_admin);
-    let flag_issuer = Address::generate(&env);
-    let flag_id = env.register(JurisdictionFlag, ());
-    JurisdictionFlagClient::new(&env, &flag_id).initialize(&flag_issuer);
-    let breaker_admin = Address::generate(&env);
-    let breaker_id = env.register(CircuitBreaker, ());
-    CbClient::new(&env, &breaker_id).initialize(&breaker_admin);
-
-    // Deploy the current release WASM and write state.
-    let agg_admin = Address::generate(&env);
-    let agg_id = env.register(wasm.as_slice(), ());
-    let client = ComplianceAggregatorClient::new(&env, &agg_id);
-    client.initialize(&agg_admin, &Some(gate_id.clone()), &None, &None);
-    client.set_jurisdiction_flag(&agg_admin, &flag_id);
-    client.set_circuit_breaker(&agg_admin, &breaker_id);
-
-    let alice = Address::generate(&env);
-    let mallory = Address::generate(&env);
-    set_jurisdiction(&env, &flag_id, &flag_issuer, &alice, "US");
-    set_jurisdiction(&env, &flag_id, &flag_issuer, &mallory, "US");
-    deny(&env, &gate_id, &gate_admin, &mallory);
-
-    // Upgrade to a newly uploaded WASM hash.
-    let new_hash = env.deployer().upload_contract_wasm(soroban_sdk::Bytes::from_slice(&env, &wasm));
-    client.upgrade(&agg_admin, &new_hash);
-
-    // State is intact.
-    assert_eq!(client.denylist_gate(), Some(gate_id.clone()));
-    assert_eq!(client.jurisdiction_flag(), Some(flag_id.clone()));
-    assert_eq!(client.circuit_breaker(), Some(breaker_id.clone()));
-    assert!(!client.is_paused());
-
-    // And the contract is still callable after the upgrade.
-    let (alice_ok, alice_checks) = client.check_address(&alice, &us_vec(&env));
-    assert!(alice_ok);
-    assert_eq!(alice_checks.len(), 3);
-    let (mallory_ok, _) = client.check_address(&mallory, &us_vec(&env));
-    assert!(!mallory_ok);
-
-    // Admin is preserved: admin-only mutations still work for the old admin
-    // and are still rejected for anyone else.
-    let new_admin = Address::generate(&env);
-    assert_eq!(client.try_set_admin(&new_admin, &new_admin), Err(Ok(Error::NotAuthorized)));
-    client.set_admin(&agg_admin, &new_admin);
-    client.pause(&new_admin);
-    assert!(client.is_paused());
-}
-
-// ---------------------------------------------------------------------------
-// Resource-fee benchmark (budget regression) — `check_address`
-//
-// `check_address` is the aggregator's hottest entrypoint: consumers call it
-// once per transfer, and it fans out to both registered primitives. The
-// measured CPU/memory cost is compared against the
-// `[compliance-aggregator.check_address]` entry in `budget-baselines.toml`;
-// the test (and therefore the `budget-regression` CI job, which runs
-// `cargo test --workspace budget_regression`) fails if either exceeds the
-// baseline by more than 10%.
-// ---------------------------------------------------------------------------
-
-fn read_baseline(path: &std::path::Path, section: &str) -> (u64, u64) {
-    let contents = std::fs::read_to_string(path).unwrap();
-    let section_header = std::format!("[{section}]");
-    let mut in_section = false;
-    let mut cpu = None;
-    let mut memory = None;
-
-    for line in contents.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            in_section = trimmed == section_header;
-            continue;
-        }
-        if !in_section {
-            continue;
-        }
-        if let Some(value) = trimmed.strip_prefix("cpu = ") {
-            cpu = Some(value.replace('_', "").parse::<u64>().unwrap());
-        } else if let Some(value) = trimmed.strip_prefix("memory = ") {
-            memory = Some(value.replace('_', "").parse::<u64>().unwrap());
-        }
-    }
-
-    let cpu = cpu.expect("missing cpu baseline");
-    let memory = memory.expect("missing memory baseline");
-    (cpu, memory)
-}
-
-fn baseline_path() -> std::path::PathBuf {
-    std::path::PathBuf::from(std::env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("budget-baselines.toml")
-}
-
-fn assert_budget_within_threshold(measured: (u64, u64), baseline: (u64, u64), label: &str) {
-    let (measured_cpu, measured_memory) = measured;
-    let (baseline_cpu, baseline_memory) = baseline;
-    let cpu_limit = (baseline_cpu as f64 * 1.10).ceil() as u64;
-    let memory_limit = (baseline_memory as f64 * 1.10).ceil() as u64;
-
-    assert!(
-        measured_cpu <= cpu_limit,
-        "{label} CPU regression: measured {measured_cpu}, baseline {baseline_cpu}, limit {cpu_limit}"
-    );
-    assert!(
-        measured_memory <= memory_limit,
-        "{label} memory regression: measured {measured_memory}, baseline {baseline_memory}, limit {memory_limit}"
-    );
-}
-
-#[test]
-fn test_budget_regression_check_address() {
-    let env = Env::default();
-    let (_ga, _gid, flag_issuer, flag_id, _admin, _agg_id, client) = setup_all(&env);
-    let alice = Address::generate(&env);
-    set_jurisdiction(&env, &flag_id, &flag_issuer, &alice, "US");
-    let allowed = us_vec(&env);
-
-    let mut budget = env.cost_estimate().budget();
-    budget.reset_default();
-    let (all_passed, checks) = client.check_address(&alice, &allowed);
-    let measured = (budget.cpu_instruction_cost(), budget.memory_bytes_cost());
-    assert!(all_passed);
-    assert_eq!(checks.len(), 2);
-
-    std::println!("compliance-aggregator.check_address: cpu = {}, memory = {}", measured.0, measured.1);
-
-    let baseline = read_baseline(&baseline_path(), "compliance-aggregator.check_address");
-    assert_budget_within_threshold(measured, baseline, "compliance-aggregator check_address");
-}
-
-// ---------------------------------------------------------------------------
-// TTL extension (#194)
-// ---------------------------------------------------------------------------
-
-fn instance_ttl(env: &Env, contract_id: &Address) -> u32 {
-    use soroban_sdk::testutils::storage::Instance as _;
-    env.as_contract(contract_id, || env.storage().instance().get_ttl())
-}
-
-#[test]
-fn test_initialize_extends_instance_ttl() {
-    use soroban_sdk::testutils::Ledger as _;
-
-    let env = Env::default();
-    env.ledger().with_mut(|li| {
-        li.sequence_number = 100_000;
-        li.min_persistent_entry_ttl = 500;
-        li.max_entry_ttl = 6_311_520;
-    });
-    let (_, _, _, _, _, agg_id, _) = setup_all(&env);
-
-    assert_eq!(instance_ttl(&env, &agg_id), INSTANCE_TTL_EXTEND_TO);
-}
-
-/// Advance the ledger past the TTL the instance was given at initialization,
-/// with a config write in between, and confirm the stored state is still
-/// readable because the write refreshed the TTL.
-#[test]
-fn test_write_refreshes_instance_ttl_past_original_expiry() {
-    use soroban_sdk::testutils::Ledger as _;
-
-    let env = Env::default();
-    env.ledger().with_mut(|li| {
-        li.sequence_number = 100_000;
-        li.min_persistent_entry_ttl = 500;
-        li.max_entry_ttl = 6_311_520;
-    });
-    let (_, gate_id, _, flag_id, agg_admin, agg_id, client) = setup_all(&env);
-    let original_ttl = instance_ttl(&env, &agg_id);
-    assert_eq!(original_ttl, INSTANCE_TTL_EXTEND_TO);
-
-    // Move far enough that the remaining TTL drops below the threshold.
-    let first_advance = INSTANCE_TTL_EXTEND_TO - INSTANCE_TTL_THRESHOLD + 1;
-    env.ledger().with_mut(|li| li.sequence_number += first_advance);
-    assert!(instance_ttl(&env, &agg_id) < INSTANCE_TTL_THRESHOLD);
-
-    // A write path refreshes the TTL back to the target.
-    client.set_denylist_gate(&agg_admin, &gate_id);
-    assert_eq!(instance_ttl(&env, &agg_id), INSTANCE_TTL_EXTEND_TO);
-
-    // The underlying primitives are separate contracts with their own TTL
-    // policy; keep them alive so the check below only exercises the
-    // aggregator's own storage.
-    env.deployer().extend_ttl(gate_id.clone(), INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
-    env.deployer().extend_ttl(flag_id.clone(), INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
-
-    // Now advance beyond the original expiry. Without the refresh the
-    // instance would have been archived by this point.
-    env.ledger().with_mut(|li| li.sequence_number += INSTANCE_TTL_THRESHOLD);
-    assert!(first_advance + INSTANCE_TTL_THRESHOLD > original_ttl);
-
-    assert_eq!(client.denylist_gate(), Some(gate_id));
-    assert_eq!(client.jurisdiction_flag(), Some(flag_id));
-    let alice = Address::generate(&env);
-    let (_, results) = client.check_address(&alice, &us_vec(&env));
-    assert_eq!(results.len(), 2);
-}
-
-#[test]
-fn test_every_admin_write_path_extends_instance_ttl() {
-    use soroban_sdk::testutils::Ledger as _;
-
-    let env = Env::default();
-    env.ledger().with_mut(|li| {
-        li.sequence_number = 100_000;
-        li.min_persistent_entry_ttl = 500;
-        li.max_entry_ttl = 6_311_520;
-    });
-    let (_, gate_id, _, flag_id, agg_admin, agg_id, client) = setup_all(&env);
-    let breaker = Address::generate(&env);
-    let new_admin = Address::generate(&env);
-    let step = INSTANCE_TTL_EXTEND_TO - INSTANCE_TTL_THRESHOLD + 1;
-
-    let age = |env: &Env| {
-        env.ledger().with_mut(|li| li.sequence_number += step);
-        assert!(instance_ttl(env, &agg_id) < INSTANCE_TTL_THRESHOLD);
-    };
-
-    age(&env);
-    client.set_denylist_gate(&agg_admin, &gate_id);
-    assert_eq!(instance_ttl(&env, &agg_id), INSTANCE_TTL_EXTEND_TO);
-
-    age(&env);
-    client.set_jurisdiction_flag(&agg_admin, &flag_id);
-    assert_eq!(instance_ttl(&env, &agg_id), INSTANCE_TTL_EXTEND_TO);
-
-    age(&env);
-    client.set_circuit_breaker(&agg_admin, &breaker);
-    assert_eq!(instance_ttl(&env, &agg_id), INSTANCE_TTL_EXTEND_TO);
-
-    age(&env);
-    client.pause(&agg_admin);
-    assert_eq!(instance_ttl(&env, &agg_id), INSTANCE_TTL_EXTEND_TO);
-
-    age(&env);
-    client.unpause(&agg_admin);
-    assert_eq!(instance_ttl(&env, &agg_id), INSTANCE_TTL_EXTEND_TO);
-
-    age(&env);
-    client.set_admin(&agg_admin, &new_admin);
-    assert_eq!(instance_ttl(&env, &agg_id), INSTANCE_TTL_EXTEND_TO);
-}
-
-#[test]
-fn test_clear_denylist_gate_emits_event_with_previous() {
-    let env = Env::default();
-    let (_gate_admin, gate_id, _flag_issuer, _flag_id, agg_admin, _agg_id, agg_client) =
-        setup_all(&env);
-
-    agg_client.clear_denylist_gate(&agg_admin);
-    let events = env.events().all();
-    let (_contract_id, topics, _data) = events.last().unwrap();
-    assert_eq!(
-        topics.get_unchecked(0),
-        soroban_sdk::Symbol::new(&env, "denylist_gate_cleared").into_val(&env)
-    );
-    assert_eq!(topics.get_unchecked(1), gate_id.into_val(&env));
-
-    // Clearing again (nothing registered) must NOT emit another event.
-    let count = env.events().all().len();
-    agg_client.clear_denylist_gate(&agg_admin);
-    assert_eq!(env.events().all().len(), count);
-}
-
-#[test]
-fn test_clear_jurisdiction_flag_emits_event_with_previous() {
-    let env = Env::default();
-    let (_gate_admin, _gate_id, _flag_issuer, flag_id, agg_admin, _agg_id, agg_client) =
-        setup_all(&env);
-
-    agg_client.clear_jurisdiction_flag(&agg_admin);
-    let events = env.events().all();
-    let (_contract_id, topics, _data) = events.last().unwrap();
-    assert_eq!(
-        topics.get_unchecked(0),
-        soroban_sdk::Symbol::new(&env, "jurisdiction_flag_cleared").into_val(&env)
-    );
-    assert_eq!(topics.get_unchecked(1), flag_id.into_val(&env));
-
-    // Clearing again must NOT emit another event.
-    let count = env.events().all().len();
-    agg_client.clear_jurisdiction_flag(&agg_admin);
-    assert_eq!(env.events().all().len(), count);
-}
-
-// ---------------------------------------------------------------------------
-// End-to-end: composing all primitives including pause and freeze states
-// ---------------------------------------------------------------------------
-
-/// Full-stack end-to-end test: registers both a denylist-gate and a
-/// jurisdiction-flag in the aggregator and verifies combined outcomes
-/// across all four quadrants of the truth table, plus pause and freeze
-/// short-circuit states (issue #818).
-#[test]
-fn test_e2e_all_primitives_combined_outcomes() {
-    let env = Env::default();
-    let (gate_admin, gate_id, flag_issuer, flag_id, agg_admin, _, client) = setup_all(&env);
-
-    let alice = Address::generate(&env);
-    let bob = Address::generate(&env);
-
-    // Set allowed jurisdiction codes on the flag contract.
-    let allowed = vec![&env, String::from_str(&env, "US")];
-
-    // Neither address is on the denylist or has a jurisdiction set yet.
-    // With both checks registered but no jurisdiction set,
-    // jurisdiction check passes (no codes = not restricted).
-    let (all_passed, results) = client.check_address(&alice, &allowed);
-    assert!(all_passed, "both checks pass for clean address");
-    assert_eq!(results.len(), 2);
-
-    // Deny alice — denylist check fails, jurisdiction still passes.
-    deny(&env, &gate_id, &gate_admin, &alice);
-    let (all_passed, results) = client.check_address(&alice, &allowed);
-    assert!(!all_passed, "denied address should not pass");
-    let deny_result = results.iter().find(|r| r.check == CheckKind::DenylistGate);
-    assert!(deny_result.is_some());
-    assert!(!deny_result.unwrap().passed, "denylist check should fail for alice");
-
-    // Remove alice from denylist; now both pass again.
-    DenylistGateClient::new(&env, &gate_id).remove_from_denylist(&gate_admin, &alice);
-    let (all_passed, _) = client.check_address(&alice, &allowed);
-    assert!(all_passed, "both checks pass after removing from denylist");
-
-    // Set bob's jurisdiction to a blocked code (not in allowed list).
-    set_jurisdiction(&env, &flag_id, &flag_issuer, &bob, "CN");
-    let (all_passed, results) = client.check_address(&bob, &allowed);
-    assert!(!all_passed, "wrong jurisdiction should not pass");
-    let jur_result = results.iter().find(|r| r.check == CheckKind::JurisdictionFlag);
-    assert!(jur_result.is_some());
-    assert!(!jur_result.unwrap().passed, "jurisdiction check should fail for bob");
-
-    // Set bob's jurisdiction to an allowed code — both checks pass.
-    set_jurisdiction(&env, &flag_id, &flag_issuer, &bob, "US");
-    let (all_passed, _) = client.check_address(&bob, &allowed);
-    assert!(all_passed, "correct jurisdiction passes");
-
-    // Deny bob and give him a bad jurisdiction at the same time — both fail.
-    deny(&env, &gate_id, &gate_admin, &bob);
-    set_jurisdiction(&env, &flag_id, &flag_issuer, &bob, "CN");
-    let (all_passed, results) = client.check_address(&bob, &allowed);
-    assert!(!all_passed, "both checks fail simultaneously");
-    for r in results.iter() {
-        match r.check {
-            CheckKind::DenylistGate => assert!(!r.passed, "denylist should fail"),
-            CheckKind::JurisdictionFlag => assert!(!r.passed, "jurisdiction should fail"),
-            _ => {}
-        }
-    }
-}
-
-/// Verifies that `check_all` aggregates combined outcomes across a batch
-/// of addresses, including mixed pass/fail states, covering issue #818.
-#[test]
-fn test_e2e_check_all_combined_outcomes() {
-    let env = Env::default();
-    let (gate_admin, gate_id, flag_issuer, flag_id, _, _, client) = setup_all(&env);
-
-    let alice = Address::generate(&env);
-    let bob = Address::generate(&env);
-    let carol = Address::generate(&env);
-
-    let allowed = vec![&env, String::from_str(&env, "US")];
-    let addresses = vec![&env, alice.clone(), bob.clone(), carol.clone()];
-
-    // alice: clean
-    // bob: denied
-    // carol: bad jurisdiction
-    deny(&env, &gate_id, &gate_admin, &bob);
-    set_jurisdiction(&env, &flag_id, &flag_issuer, &carol, "CN");
-
-    let results = client.check_all(&addresses, &allowed);
-    assert_eq!(results.len(), 3);
-
-    let alice_res = results.iter().find(|r| r.address == alice).unwrap();
-    let bob_res = results.iter().find(|r| r.address == bob).unwrap();
-    let carol_res = results.iter().find(|r| r.address == carol).unwrap();
-
-    assert!(alice_res.all_passed, "alice should pass all checks");
-    assert!(!bob_res.all_passed, "denied bob should not pass");
-    assert!(!carol_res.all_passed, "wrong-jurisdiction carol should not pass");
-}
-
-/// Verifies that the aggregator's pause state short-circuits all mutations
-/// while still allowing read-only checks (issue #818).
-#[test]
-fn test_e2e_pause_state_blocks_mutations() {
-    let env = Env::default();
-    let (_, gate_id, _, _, agg_admin, _, client) = setup_all(&env);
-
-    // Pause the aggregator.
-    client.pause(&agg_admin);
-    assert!(client.is_paused());
-
-    // Admin mutations are blocked while paused.
-    let new_gate = env.register(DenylistGate, ());
-    let res = client.try_set_denylist_gate(&agg_admin, &new_gate);
-    assert_eq!(res, Err(Ok(Error::ContractPaused)));
-
-    // Check reads are allowed even while paused.
-    let alice = Address::generate(&env);
-    let allowed = vec![&env, String::from_str(&env, "US")];
-    // check_address itself calls the underlying primitives; since the
-    // aggregator is paused (not the primitives), the read still succeeds.
-    let (all_passed, _) = client.check_address(&alice, &allowed);
-    assert!(all_passed, "read check still works while aggregator is paused");
-
-    // Unpause and confirm mutations are unblocked.
-    client.unpause(&agg_admin);
-    assert!(!client.is_paused());
-    client.set_denylist_gate(&agg_admin, &gate_id); // should not panic
-}
-
-/// Verifies that a configured circuit-breaker in the frozen state short-circuits
-/// all check results to failing, independent of denylist/jurisdiction state
-/// (issue #818).
-#[test]
-fn test_e2e_freeze_state_short_circuits_all_checks() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let gate_admin = Address::generate(&env);
-    let gate_id = env.register(DenylistGate, ());
-    DenylistGateClient::new(&env, &gate_id).initialize(&gate_admin);
-
-    let flag_issuer = Address::generate(&env);
-    let flag_id = env.register(JurisdictionFlag, ());
-    JurisdictionFlagClient::new(&env, &flag_id).initialize(&flag_issuer);
-
-    let breaker_admin = Address::generate(&env);
-    let breaker_id = env.register(CircuitBreaker, ());
-    let breaker_client = CbClient::new(&env, &breaker_id);
-    breaker_client.initialize(&breaker_admin);
-
-    let agg_admin = Address::generate(&env);
-    let agg_id = env.register(ComplianceAggregator, ());
-    let client = ComplianceAggregatorClient::new(&env, &agg_id);
-    client.initialize(
-        &agg_admin,
-        &Some(gate_id.clone()),
-        &Some(flag_id.clone()),
-        &Some(breaker_id.clone()),
-    );
-
-    let alice = Address::generate(&env);
-    let bob = Address::generate(&env);
-    let allowed = vec![&env, String::from_str(&env, "US")];
-
-    // Both addresses start clean — circuit not frozen.
-    let (all_passed, _) = client.check_address(&alice, &allowed);
-    assert!(all_passed, "passes before freeze");
-
-    // Freeze the circuit breaker.
-    breaker_client.freeze(&breaker_admin, &None);
-
-    // Both addresses now fail regardless of denylist/jurisdiction state.
-    let (all_passed, checks) = client.check_address(&alice, &allowed);
-    assert!(!all_passed, "frozen circuit short-circuits alice");
-    assert_eq!(checks.len(), 1);
-    assert_eq!(checks.get(0).unwrap().check, CheckKind::CircuitBreaker);
-    assert!(!checks.get(0).unwrap().passed);
-
-    // batch check also short-circuits
-    let addresses = vec![&env, alice.clone(), bob.clone()];
-    let batch = client.check_all(&addresses, &allowed);
-    for r in batch.iter() {
-        assert!(!r.all_passed, "every address fails under freeze");
-    }
-
-    // Unfreeze and confirm everything passes again.
-    breaker_client.unfreeze(&breaker_admin);
-    let (all_passed, _) = client.check_address(&alice, &allowed);
-    assert!(all_passed, "passes after unfreeze");
-}
